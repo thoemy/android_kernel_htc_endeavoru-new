@@ -374,3 +374,8 @@ void tegra_io_dpd_disable(struct tegra_io_dpd *hnd)
 	return;
 }
 EXPORT_SYMBOL(tegra_io_dpd_disable);
+
+void tegra_bl_io_dpd_cleanup()
+{
+}
+EXPORT_SYMBOL(tegra_bl_io_dpd_cleanup);
