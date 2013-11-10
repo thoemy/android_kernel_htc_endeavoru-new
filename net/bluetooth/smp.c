@@ -459,13 +459,9 @@ static u8 smp_cmd_security_req(struct l2cap_conn *conn, struct sk_buff *skb)
 
 int smp_conn_security(struct l2cap_conn *conn, __u8 sec_level)
 {
-	struct hci_conn *hcon = conn->hcon;
 	__u8 authreq;
 
-	BT_DBG("conn %p hcon %p level 0x%2.2x", conn, hcon, sec_level);
-
-	if (IS_ERR(hcon->hdev->tfm))
-		return 1;
+	BT_DBG("conn %p hcon %p level 0x%2.2x", conn, conn->hcon, sec_level);
 
 	if (test_bit(HCI_CONN_ENCRYPT_PEND, &hcon->pend))
 		return 0;
@@ -478,7 +474,7 @@ int smp_conn_security(struct l2cap_conn *conn, __u8 sec_level)
 
 	authreq = seclevel_to_authreq(sec_level);
 
-	if (hcon->link_mode & HCI_LM_MASTER) {
+	if (conn->hcon->link_mode & HCI_LM_MASTER) {
 		struct smp_cmd_pairing cp;
 		struct link_key *key;
 
@@ -546,12 +542,6 @@ int smp_sig_channel(struct l2cap_conn *conn, struct sk_buff *skb)
 	__u8 reason;
 	int err = 0;
 
-	if (IS_ERR(conn->hcon->hdev->tfm)) {
-		err = PTR_ERR(conn->hcon->hdev->tfm);
-		reason = SMP_PAIRING_NOTSUPP;
-		goto done;
-	}
-
 	skb_pull(skb, sizeof(code));
 
 	switch (code) {
@@ -599,14 +589,10 @@ int smp_sig_channel(struct l2cap_conn *conn, struct sk_buff *skb)
 		BT_DBG("Unknown command code 0x%2.2x", code);
 
 		reason = SMP_CMD_NOTSUPP;
-		err = -EOPNOTSUPP;
-		goto done;
-	}
-
-done:
-	if (reason)
 		smp_send_cmd(conn, SMP_CMD_PAIRING_FAIL, sizeof(reason),
 								&reason);
+		err = -EOPNOTSUPP;
+	}
 
 	kfree_skb(skb);
 	return err;
