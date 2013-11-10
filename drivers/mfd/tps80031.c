@@ -106,9 +106,6 @@
 #define TPS80031_CFG_INPUT_PUPD3 0xF2
 #define TPS80031_CFG_INPUT_PUPD4 0xF3
 
-#define TPS80031_BBSPOR_CFG	0xE6
-#define TPS80031_BBSPOR_CHG_EN	0x8
-
 /* Valid Address ranges */
 #define TPS80031_ID0_PMIC_SLAVE_SMPS_DVS	0x55 ... 0x5C
 
@@ -506,17 +503,6 @@ static void tps80031_pupd_init(struct tps80031 *tps80031,
 		tps80031_update(tps80031->dev, SLAVE_ID1, pupd->reg,
 				update_value, update_mask);
 	}
-}
-
-static void tps80031_backup_battery_charger_control(struct tps80031 *tps80031,
-						    int enable)
-{
-	if (enable)
-		tps80031_update(tps80031->dev, SLAVE_ID1, TPS80031_BBSPOR_CFG,
-				TPS80031_BBSPOR_CHG_EN, TPS80031_BBSPOR_CHG_EN);
-	else
-		tps80031_update(tps80031->dev, SLAVE_ID1, TPS80031_BBSPOR_CFG,
-				0, TPS80031_BBSPOR_CHG_EN);
 }
 
 static void tps80031_init_ext_control(struct tps80031 *tps80031,
@@ -1360,8 +1346,6 @@ static int __devinit tps80031_i2c_probe(struct i2c_client *client,
 
 	tps80031_debuginit(tps80031);
 
-	tps80031_backup_battery_charger_control(tps80031, 1);
-
 	if (pdata->use_power_off && !pm_power_off)
 		pm_power_off = tps80031_power_off;
 
@@ -1389,19 +1373,13 @@ fail_client_reg:
 #ifdef CONFIG_PM
 static int tps80031_i2c_suspend(struct device *dev)
 {
-	struct i2c_client *client = to_i2c_client(dev);
-	struct tps80031 *tps80031 = i2c_get_clientdata(client);
 	if (client->irq)
 		disable_irq(client->irq);
-	tps80031_backup_battery_charger_control(tps80031, 0);
 	return 0;
 }
 
 static int tps80031_i2c_resume(struct device *dev)
 {
-	struct i2c_client *client = to_i2c_client(dev);
-	struct tps80031 *tps80031 = i2c_get_clientdata(client);
-	tps80031_backup_battery_charger_control(tps80031, 1);
 	if (client->irq)
 		enable_irq(client->irq);
 	return 0;
