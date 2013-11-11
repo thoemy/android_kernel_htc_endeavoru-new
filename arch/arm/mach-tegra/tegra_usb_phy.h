@@ -95,7 +95,6 @@ struct tegra_usb_phy {
 	bool phy_power_on;
 	bool remote_wakeup;
 	bool hw_accessible;
-	bool ulpi_clk_padout_ena;
 	bool pmc_sleepwalk;
 	bool bus_reseting;
 };
