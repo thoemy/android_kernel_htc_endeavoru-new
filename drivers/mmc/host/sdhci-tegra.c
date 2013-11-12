@@ -23,9 +23,12 @@
 #include <linux/slab.h>
 #include <linux/mmc/card.h>
 #include <linux/mmc/host.h>
+#include <linux/mmc/mmc.h>
 #include <linux/mmc/sd.h>
 #include <linux/regulator/consumer.h>
 #include <linux/delay.h>
+#include <linux/proc_fs.h>
+#include <linux/android_alarm.h>
 
 #include <mach/gpio.h>
 #include <mach/sdhci.h>
@@ -68,12 +71,22 @@
 #define SD_SEND_TUNING_PATTERN	19
 #define MAX_TAP_VALUES	256
 
+#define TEGRA_PRIMARY_ICTLR_BASE 0x60004000
+#define BKOPS_MAGIC 689
+
 static unsigned int tegra_sdhost_min_freq;
 static unsigned int tegra_sdhost_std_freq;
+struct alarm htc_mmc_bkops_alarm;
+int htc_mmc_bkops_alarm_flag = 0;
+int htc_mmc_needs_bkops = 0;
+
+
+
 
 #ifdef CONFIG_ARCH_TEGRA_3x_SOC
 static void tegra_3x_sdhci_set_card_clock(struct sdhci_host *sdhci, unsigned int clock);
 static void tegra3_sdhci_post_reset_init(struct sdhci_host *sdhci);
+static void tegra_sdhci_dump_irq_reg(struct sdhci_host *sdhci);
 
 static unsigned int tegra3_sdhost_max_clk[4] = {
 	208000000,	104000000,	208000000,	104000000 };
@@ -119,7 +132,18 @@ struct tegra_sdhci_host {
 	bool is_rail_enabled;
 	struct clk *emc_clk;
 	unsigned int emc_max_clk;
+
+	struct proc_dir_entry *wr_perf_proc;
+	struct proc_dir_entry *burst_proc;
+	struct proc_dir_entry *bkops_proc;
 };
+
+static void mmc_bkops_alarm_handler(struct alarm *alarm)
+{
+        printk(KERN_INFO "mmc0: %s\n", __func__);
+    return;
+}
+
 
 static u32 tegra_sdhci_readl(struct sdhci_host *host, int reg)
 {
@@ -284,7 +308,7 @@ static void sdhci_status_notify_cb(int card_present, void *dev_id)
 	struct tegra_sdhci_platform_data *plat;
 	unsigned int status, oldstat;
 
-	pr_debug("%s: card_present %d\n", mmc_hostname(sdhci->mmc),
+	printk("%s: card_present %d\n", mmc_hostname(sdhci->mmc),
 		card_present);
 
 	plat = pdev->dev.platform_data;
@@ -298,7 +322,7 @@ static void sdhci_status_notify_cb(int card_present, void *dev_id)
 	oldstat = plat->mmc_data.card_present;
 	plat->mmc_data.card_present = status;
 	if (status ^ oldstat) {
-		pr_debug("%s: Slot status change detected (%d -> %d)\n",
+		printk("%s: Slot status change detected (%d -> %d)\n",
 			mmc_hostname(sdhci->mmc), oldstat, status);
 		if (status && !plat->mmc_data.built_in)
 			mmc_detect_change(sdhci->mmc, (5 * HZ) / 2);
@@ -372,14 +396,7 @@ static void tegra_sdhci_set_clk_rate(struct sdhci_host *sdhci,
 	unsigned int clk_rate;
 	unsigned int emc_clk;
 
-	/*
-	 * In SDR50 mode, run the sdmmc controller at freq greater than
-	 * 104MHz to ensure the core voltage is at 1.2V. If the core voltage
-	 * is below 1.2V, CRC errors would occur during data transfers.
-	 */
-	if (sdhci->mmc->card &&
-		(mmc_card_ddr_mode(sdhci->mmc->card) ||
-		(sdhci->mmc->ios.timing == MMC_TIMING_UHS_SDR50))) {
+	if (sdhci->mmc->ios.timing == MMC_TIMING_UHS_DDR50) {
 		/*
 		 * In ddr mode, tegra sdmmc controller clock frequency
 		 * should be double the card clock frequency.
@@ -394,6 +411,13 @@ static void tegra_sdhci_set_clk_rate(struct sdhci_host *sdhci,
 		} else {
 			clk_rate = clock * 2;
 		}
+	} else 	if (sdhci->mmc->ios.timing == MMC_TIMING_UHS_SDR50) {
+		/*
+		 * In SDR50 mode, run the sdmmc controller at freq greater than
+		 * 104MHz to ensure the core voltage is at 1.2V. If the core voltage
+		 * is below 1.2V, CRC errors would occur during data transfers.
+		 */
+		clk_rate = clock * 2;
 	} else {
 		if (clock <= tegra_sdhost_min_freq)
 			clk_rate = tegra_sdhost_min_freq;
@@ -658,35 +682,14 @@ static void sdhci_tegra_set_tap_delay(struct sdhci_host *sdhci,
 	sdhci_writel(sdhci, vendor_ctrl, SDHCI_VENDOR_CLOCK_CNTRL);
 }
 
-static void sdhci_tegra_clear_set_irqs(struct sdhci_host *host,
-	u32 clear, u32 set)
-{
-	u32 ier;
-
-	ier = sdhci_readl(host, SDHCI_INT_ENABLE);
-	ier &= ~clear;
-	ier |= set;
-	sdhci_writel(host, ier, SDHCI_INT_ENABLE);
-	sdhci_writel(host, ier, SDHCI_SIGNAL_ENABLE);
-}
-
 static int sdhci_tegra_run_frequency_tuning(struct sdhci_host *sdhci)
 {
 	int err = 0;
 	u8 ctrl;
-	u32 ier;
 	u32 mask;
 	unsigned int timeout = 10;
 	int flags;
 	u32 intstatus;
-
-	/*
-	 * As per the Host Controller spec v3.00, tuning command
-	 * generates Buffer Read Ready interrupt only, so enable that.
-	 */
-	ier = sdhci_readl(sdhci, SDHCI_INT_ENABLE);
-	sdhci_tegra_clear_set_irqs(sdhci, ier, SDHCI_INT_DATA_AVAIL |
-		SDHCI_INT_DATA_CRC);
 
 	mask = SDHCI_CMD_INHIBIT | SDHCI_DATA_INHIBIT;
 	while (sdhci_readl(sdhci, SDHCI_PRESENT_STATE) & mask) {
@@ -759,7 +762,6 @@ static int sdhci_tegra_run_frequency_tuning(struct sdhci_host *sdhci)
 	}
 	mdelay(1);
 out:
-	sdhci_tegra_clear_set_irqs(sdhci, SDHCI_INT_DATA_AVAIL, ier);
 	return err;
 }
 
@@ -773,6 +775,7 @@ static int sdhci_tegra_execute_tuning(struct sdhci_host *sdhci)
 	unsigned int temp_pass_window = 0;
 	unsigned int best_low_pass_tap = 0;
 	unsigned int best_pass_window = 0;
+	u32 ier;
 
 	/* Tuning is valid only in SDR104 and SDR50 modes */
 	ctrl_2 = sdhci_readw(sdhci, SDHCI_HOST_CONTROL2);
@@ -785,9 +788,18 @@ static int sdhci_tegra_execute_tuning(struct sdhci_host *sdhci)
 	if (tap_delay_status == NULL) {
 		dev_err(mmc_dev(sdhci->mmc), "failed to allocate memory"
 			"for storing tap_delay_status\n");
-		err = -ENOMEM;
-		goto out;
+		return -ENOMEM;
 	}
+
+	/*
+	 * Disable all interrupts signalling.Enable interrupt status
+	 * detection for buffer read ready and data crc. We use
+	 * polling for tuning as it involves less overhead.
+	 */
+	ier = sdhci_readl(sdhci, SDHCI_INT_ENABLE);
+	sdhci_writel(sdhci, 0, SDHCI_SIGNAL_ENABLE);
+	sdhci_writel(sdhci, SDHCI_INT_DATA_AVAIL |
+		SDHCI_INT_DATA_CRC, SDHCI_INT_ENABLE);
 
 	/*
 	 * Set each tap delay value and run frequency tuning. After each
@@ -840,7 +852,10 @@ static int sdhci_tegra_execute_tuning(struct sdhci_host *sdhci)
 	/* Run frequency tuning */
 	err = sdhci_tegra_run_frequency_tuning(sdhci);
 
-out:
+	/* Enable the normal interrupts signalling */
+	sdhci_writel(sdhci, ier, SDHCI_INT_ENABLE);
+	sdhci_writel(sdhci, ier, SDHCI_SIGNAL_ENABLE);
+
 	if (tap_delay_status)
 		kfree(tap_delay_status);
 
@@ -851,6 +866,10 @@ static int tegra_sdhci_suspend(struct sdhci_host *sdhci, pm_message_t state)
 {
 	struct sdhci_pltfm_host *pltfm_host = sdhci_priv(sdhci);
 	struct tegra_sdhci_host *tegra_host = pltfm_host->priv;
+	struct platform_device *pdev = to_platform_device(mmc_dev(sdhci->mmc));
+	struct tegra_sdhci_platform_data *plat;
+
+	plat = pdev->dev.platform_data;
 
 	tegra_sdhci_set_clock(sdhci, 0);
 
@@ -865,6 +884,9 @@ static int tegra_sdhci_suspend(struct sdhci_host *sdhci, pm_message_t state)
 		}
 	}
 
+	if (plat->suspend_gpiocfg)
+		plat->suspend_gpiocfg();
+
 	return 0;
 }
 
@@ -872,6 +894,13 @@ static int tegra_sdhci_resume(struct sdhci_host *sdhci)
 {
 	struct sdhci_pltfm_host *pltfm_host = sdhci_priv(sdhci);
 	struct tegra_sdhci_host *tegra_host = pltfm_host->priv;
+	struct platform_device *pdev = to_platform_device(mmc_dev(sdhci->mmc));
+	struct tegra_sdhci_platform_data *plat;
+
+	plat = pdev->dev.platform_data;
+
+	if (plat->resume_gpiocfg)
+		plat->resume_gpiocfg();
 
 	/* Enable the power rails if any */
 	if (tegra_host->card_present) {
@@ -898,6 +927,26 @@ static int tegra_sdhci_resume(struct sdhci_host *sdhci)
 	return 0;
 }
 
+static int tegra_sdhci_get_max_clock(struct sdhci_host *sdhci)
+{
+	if (sdhci->version >= SDHCI_SPEC_300)
+		return 255000000;
+	else
+		return 63000000;
+}
+
+static int tegra_sdhci_get_min_clock(struct sdhci_host *sdhci)
+{
+	return 400000;
+}
+
+static void tegra_sdhci_dump_irq_reg(struct sdhci_host *sdhci)
+{
+	if (sdhci && sdhci->mmc)
+		printk(KERN_INFO "%s: PRI_ICTRL_ISR_0: 0x%08x\n",
+			mmc_hostname(sdhci->mmc), readl(IO_ADDRESS(TEGRA_PRIMARY_ICTLR_BASE + 0x10)));
+}
+
 static struct sdhci_ops tegra_sdhci_ops = {
 	.get_ro     = tegra_sdhci_get_ro,
 	.get_cd     = tegra_sdhci_get_cd,
@@ -911,10 +960,13 @@ static struct sdhci_ops tegra_sdhci_ops = {
 	.set_clock  = tegra_sdhci_set_clock,
 	.suspend    = tegra_sdhci_suspend,
 	.resume     = tegra_sdhci_resume,
+	.get_max_clock = tegra_sdhci_get_max_clock,
+	.get_min_clock = tegra_sdhci_get_min_clock,
 	.platform_reset_exit = tegra_sdhci_reset_exit,
 	.set_uhs_signaling = tegra_sdhci_set_uhs_signaling,
 	.switch_signal_voltage = tegra_sdhci_signal_voltage_switch,
 	.execute_freq_tuning = sdhci_tegra_execute_tuning,
+	.dump_irq_reg = tegra_sdhci_dump_irq_reg,
 };
 
 static struct sdhci_pltfm_data sdhci_tegra_pdata = {
@@ -930,10 +982,78 @@ static struct sdhci_pltfm_data sdhci_tegra_pdata = {
 		  SDHCI_QUIRK_SINGLE_POWER_WRITE |
 		  SDHCI_QUIRK_NO_HISPD_BIT |
 		  SDHCI_QUIRK_BROKEN_ADMA_ZEROLEN_DESC |
+		  SDHCI_QUIRK_CAP_CLOCK_BASE_BROKEN |
 		  SDHCI_QUIRK_NO_CALC_MAX_DISCARD_TO |
 		  SDHCI_QUIRK_BROKEN_CARD_DETECTION,
 	.ops  = &tegra_sdhci_ops,
 };
+
+static int tegra_sdhci_proc_wperf_show(char *page, char **start,
+		off_t off, int count, int *eof, void *data)
+{
+	struct mmc_host *host = (struct mmc_host*) data;
+	if (!host || !host->card)
+		return 0;
+	return sprintf(page, "%d", host->card->wr_perf);
+}
+
+static int tegra_sdhci_proc_burst_show(char *page, char **start,
+		off_t off, int count, int *eof, void *data)
+{
+	struct mmc_host *host = (struct mmc_host*) data;
+	if (!host)
+		return 0;
+	return sprintf(page, "%d", host->burst_mode);
+}
+
+static int tegra_sdhci_proc_burst_set(struct file *file,
+		const char __user *buffer, unsigned long count, void *data)
+{
+	struct mmc_host *host = (struct mmc_host*) data;
+	char *envp[3] = {"SWITCH_NAME=camera_burst",0, 0};
+	if (!host || !host->card || !host->card->mmcblk_dev)
+		return count;
+	host->burst_mode = (buffer[0] == '0') ? 0 : 1;
+	dev_info(mmc_dev(host),
+		"%s: %d\n", __func__, host->burst_mode);
+	if (!host->burst_mode) {
+		envp[1] = "SWITCH_STATE=0";
+	} else {
+		envp[1] = "SWITCH_STATE=1";
+	}
+
+	kobject_uevent_env(&host->card->mmcblk_dev->kobj, KOBJ_CHANGE, envp);
+	return count;
+}
+
+static int tegra_sdhci_proc_bkops_show(char *page, char **start,
+		off_t off, int count, int *eof, void *data)
+{
+	struct mmc_host *host = (struct mmc_host*) data;
+	static int bkops_value = 0;
+	if (!host)
+		return 0;
+	if (host->bkops_mode == BKOPS_MAGIC)
+		bkops_value = 1;
+	else
+		bkops_value = 0;
+
+	return sprintf(page, "%d", bkops_value);
+}
+
+static int tegra_sdhci_proc_bkops_set(struct file *file,
+		const char __user *buffer, unsigned long count, void *data)
+{
+	struct mmc_host *host = (struct mmc_host*) data;
+	if (!host || !host->card || !host->card->mmcblk_dev)
+		return count;
+	host->bkops_mode = (buffer[0] == '0') ? 0 : BKOPS_MAGIC;
+	dev_info(mmc_dev(host),
+		"%s: %d\n", __func__, host->bkops_mode);
+
+	return count;
+}
+
 
 static int __devinit sdhci_tegra_probe(struct platform_device *pdev)
 {
@@ -1123,6 +1243,8 @@ static int __devinit sdhci_tegra_probe(struct platform_device *pdev)
 		host->mmc->caps |= MMC_CAP_8_BIT_DATA;
 	host->mmc->caps |= MMC_CAP_SDIO_IRQ;
 
+	host->mmc->caps2 = MMC_CAP2_BOOTPART_NOACC;
+
 	host->mmc->pm_caps |= MMC_PM_KEEP_POWER | MMC_PM_IGNORE_PM_NOTIFY;
 	if (plat->mmc_data.built_in) {
 		host->mmc->caps |= MMC_CAP_NONREMOVABLE;
@@ -1151,6 +1273,40 @@ static int __devinit sdhci_tegra_probe(struct platform_device *pdev)
 	rc = sdhci_add_host(host);
 	if (rc)
 		goto err_add_host;
+
+	if (!strcmp(dev_name(mmc_dev(host->mmc)), "sdhci-tegra.3")) {
+		tegra_host->wr_perf_proc = create_proc_entry("emmc_wr_perf", 0444, NULL);
+		if (tegra_host->wr_perf_proc) {
+			tegra_host->wr_perf_proc->read_proc = tegra_sdhci_proc_wperf_show;
+			tegra_host->wr_perf_proc->data = (void *) host->mmc;
+		} else
+			dev_warn(mmc_dev(host->mmc),
+				"Failed to create emmc_wr_perf entry\n");
+
+		tegra_host->burst_proc = create_proc_entry("emmc_burst", 0664, NULL);
+		if (tegra_host->burst_proc) {
+			tegra_host->burst_proc->read_proc = tegra_sdhci_proc_burst_show;
+			tegra_host->burst_proc->write_proc = tegra_sdhci_proc_burst_set;
+			tegra_host->burst_proc->data = (void *) host->mmc;
+		} else
+			dev_warn(mmc_dev(host->mmc),
+				"Failed to create emmc_burst entry\n");
+
+               tegra_host->bkops_proc = create_proc_entry("emmc_bkops", 0664, NULL);
+               if (tegra_host->bkops_proc) {
+			tegra_host->bkops_proc->read_proc = tegra_sdhci_proc_bkops_show;
+			tegra_host->bkops_proc->write_proc = tegra_sdhci_proc_bkops_set;
+			tegra_host->bkops_proc->data = (void *) host->mmc;
+               } else
+			dev_warn(mmc_dev(host->mmc),
+				"Failed to create emmc_bkops entry\n");
+
+
+		printk(KERN_INFO "mmc0: bkops alarm init\n");
+		alarm_init(&htc_mmc_bkops_alarm,
+		ANDROID_ALARM_ELAPSED_REALTIME_WAKEUP,
+		mmc_bkops_alarm_handler);
+        }
 
 	return 0;
 
@@ -1183,6 +1339,7 @@ err_no_mem:
 err_no_plat:
 	sdhci_pltfm_free(pdev);
 	return rc;
+
 }
 
 static int __devexit sdhci_tegra_remove(struct platform_device *pdev)
@@ -1229,23 +1386,103 @@ static int __devexit sdhci_tegra_remove(struct platform_device *pdev)
 		clk_disable(pltfm_host->clk);
 	clk_put(pltfm_host->clk);
 
+	if (tegra_host->wr_perf_proc)
+		remove_proc_entry("emmc_wr_perf", NULL);
+	if (tegra_host->burst_proc)
+		remove_proc_entry("emmc_burst", NULL);
+	if (tegra_host->bkops_proc)
+		remove_proc_entry("emmc_bkops", NULL);
+
 	sdhci_pltfm_free(pdev);
 	kfree(tegra_host);
 
 	return 0;
 }
 
+static int sdhci_pltfm_suspend_pm(struct device *dev)
+{
+	struct platform_device *plt_dev = to_platform_device(dev);
+	return sdhci_pltfm_suspend(plt_dev, PMSG_SUSPEND);
+}
+
+static int sdhci_pltfm_resume_pm(struct device *dev)
+{
+	struct platform_device *plt_dev = to_platform_device(dev);
+	return sdhci_pltfm_resume(plt_dev);
+}
+
+
+static int sdhci_pltfm_prepare(struct device *dev) {
+
+	struct platform_device *plt_dev = to_platform_device(dev);
+	struct sdhci_host *host = platform_get_drvdata(plt_dev);
+	int err;
+
+	if (host->mmc && host->mmc->card && host->mmc->card->type == MMC_TYPE_MMC) {
+		printk(KERN_INFO "mmc0: bkops_urgent_checking =%d\n", host->mmc->card->ext_csd.bkops_urgent_checking);
+		printk(KERN_INFO "mmc0: bkops_mode =%d\n", host->mmc->bkops_mode);
+		if (host->mmc->card->ext_csd.bkops_urgent_checking > 0 || (host->mmc->bkops_mode == BKOPS_MAGIC)) {
+			htc_mmc_needs_bkops = 180000;
+			host->mmc->bkops_mode = 0;
+		}
+
+		if (htc_mmc_needs_bkops > 0)
+		{
+			ktime_t interval;
+			ktime_t next_alarm;
+			long alarm_sec = ((u32) htc_mmc_needs_bkops) / 1000 + 20;
+
+			interval = ktime_set(alarm_sec, 0);
+			printk(KERN_INFO "mmc0: setup alarm, and wake up system after %llu ms\n",
+				ktime_to_ms(interval));
+
+			next_alarm = ktime_add(alarm_get_elapsed_realtime(), interval);
+
+			alarm_start_range(&htc_mmc_bkops_alarm,
+				next_alarm, ktime_add(next_alarm, ktime_set(0,0)));
+
+			htc_mmc_bkops_alarm_flag = 1;
+		}
+	}
+
+	return 0;
+}
+
+static int sdhci_pltfm_complete(struct device *dev) {
+/*
+	struct platform_device *plt_dev = to_platform_device(dev);
+	struct sdhci_host *host = platform_get_drvdata(plt_dev);
+	int ret = 0;
+
+	if (host->mmc && host->mmc->card && host->mmc->card->type == MMC_TYPE_MMC) {
+		printk(KERN_INFO "mmc0: Cancel alarm if it exists (%s)\n", __func__);
+		if (htc_mmc_bkops_alarm_flag) {
+			ret = alarm_cancel(&htc_mmc_bkops_alarm);
+			htc_mmc_bkops_alarm_flag = 0;
+		}
+	}
+*/
+	return 0;
+}
+
+static struct dev_pm_ops htc_mmc_pm_ops = {
+    .prepare = sdhci_pltfm_prepare,
+    .complete = sdhci_pltfm_complete,
+	.suspend = sdhci_pltfm_suspend_pm,
+	.resume	= sdhci_pltfm_resume_pm,
+};
+
+
 static struct platform_driver sdhci_tegra_driver = {
 	.driver		= {
 		.name	= "sdhci-tegra",
 		.owner	= THIS_MODULE,
+#ifdef CONFIG_PM
+	.pm =  &htc_mmc_pm_ops,
+#endif
 	},
 	.probe		= sdhci_tegra_probe,
 	.remove		= __devexit_p(sdhci_tegra_remove),
-#ifdef CONFIG_PM
-	.suspend	= sdhci_pltfm_suspend,
-	.resume		= sdhci_pltfm_resume,
-#endif
 };
 
 static int __init sdhci_tegra_init(void)

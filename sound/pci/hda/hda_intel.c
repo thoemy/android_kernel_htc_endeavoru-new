@@ -808,14 +808,12 @@ static unsigned int azx_rirb_get_response(struct hda_bus *bus,
 				chip->poll_count = 0;
 			return chip->rirb.res[addr]; /* the last value */
 		}
-		if (time_after(jiffies, timeout))
+		if (time_after(jiffies, timeout)){
 			break;
-		if (bus->needs_damn_long_delay)
-			msleep(2); /* temporary workaround */
-		else {
-			udelay(10);
-			cond_resched();
 		}
+		/* Remove the damn_long_delay since it will cause pcm_open() stuck. */
+		udelay(10);
+		cond_resched();
 	}
 
 	if (!chip->polling_mode && chip->poll_count < 2) {

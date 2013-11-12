@@ -609,7 +609,7 @@ static const struct usb_device_id	products [] = {
 {
 	.match_flags = USB_DEVICE_ID_MATCH_INT_INFO
 		 | USB_DEVICE_ID_MATCH_DEVICE,
-	USB_DEVICE(0x19D2,0x1554),
+	USB_DEVICE(0x19D2, 0x1554),
 	.driver_info = (unsigned long)&rmnet_info,
 },
 /*

@@ -66,4 +66,3 @@ int tegra_dc_update_csc(struct tegra_dc *dc, int win_idx)
 	return 0;
 }
 EXPORT_SYMBOL(tegra_dc_update_csc);
-

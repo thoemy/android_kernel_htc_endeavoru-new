@@ -1154,7 +1154,7 @@ int update_console_cmdline(char *name, int idx, char *name_new, int idx_new, cha
 	return -1;
 }
 
-int console_suspend_enabled = 1;
+int console_suspend_enabled = 0;
 EXPORT_SYMBOL(console_suspend_enabled);
 
 static int __init console_suspend_disable(char *str)
@@ -1343,7 +1343,10 @@ again:
 	spin_lock(&logbuf_lock);
 	if (con_start != log_end)
 		retry = 1;
+        else
+                retry = 0;
 	spin_unlock_irqrestore(&logbuf_lock, flags);
+
 	if (retry && console_trylock())
 		goto again;
 

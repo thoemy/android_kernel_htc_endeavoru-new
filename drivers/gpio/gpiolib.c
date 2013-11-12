@@ -1729,6 +1729,24 @@ void gpio_set_value_cansleep(unsigned gpio, int value)
 }
 EXPORT_SYMBOL_GPL(gpio_set_value_cansleep);
 
+#if defined(CONFIG_GPIO_PULL)
+/*
+ * one should use below functions:
+ *     gpio_set_pullnone(gpio)
+ *     gpio_set_pullup(gpio)
+ *     gpio_set_pulldown(gpio)
+ */
+void __gpio_set_pull(unsigned gpio, unsigned pull)
+{
+	struct gpio_chip	*chip;
+
+	chip = gpio_to_chip(gpio);
+	WARN_ON(chip->can_sleep);
+	trace_gpio_value(gpio, 0, pull);
+	chip->set_pull(chip, gpio - chip->base, pull);
+}
+EXPORT_SYMBOL_GPL(__gpio_set_pull);
+#endif
 
 #ifdef CONFIG_DEBUG_FS
 

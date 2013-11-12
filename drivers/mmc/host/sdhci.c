@@ -50,6 +50,9 @@ static void sdhci_finish_command(struct sdhci_host *);
 static int sdhci_execute_tuning(struct mmc_host *mmc);
 static void sdhci_tuning_timer(unsigned long data);
 
+
+
+
 static void sdhci_dumpregs(struct sdhci_host *host)
 {
 	printk(KERN_DEBUG DRIVER_NAME ": =========== REGISTER DUMP (%s)===========\n",
@@ -1134,12 +1137,27 @@ static void sdhci_set_clock(struct sdhci_host *host, unsigned int clock)
 out:
 	host->clock = clock;
 }
-
+// HTC_WIFI_START
+#if defined(CONFIG_MACH_ENDEAVORU) || defined(CONFIG_MACH_ENDEAVORTD) || defined(CONFIG_MACH_ERAU)
+static int wifi_is_on = 0;
+extern int endeavor_wifi_power(int on);
+void set_wifi_is_on (int on){
+    wifi_is_on = on;
+}
+EXPORT_SYMBOL(set_wifi_is_on);
+#endif
+// HTC_WIFI_END
 static void sdhci_set_power(struct sdhci_host *host, unsigned short power)
 {
 	u8 pwr = 0;
 
 	if (power != (unsigned short)-1) {
+		// HTC_WIFI_START
+#if defined(CONFIG_MACH_ENDEAVORU) || defined(CONFIG_MACH_ENDEAVORTD) || defined(CONFIG_MACH_ERAU)
+	if(host->mmc->index==1)
+		endeavor_wifi_power(1);
+#endif
+		// HTC_WIFI_END
 		switch (1 << power) {
 		case MMC_VDD_165_195:
 			pwr = SDHCI_POWER_180;
@@ -1155,6 +1173,14 @@ static void sdhci_set_power(struct sdhci_host *host, unsigned short power)
 		default:
 			BUG();
 		}
+	}
+	else {
+		// HTC_WIFI_START
+#if defined(CONFIG_MACH_ENDEAVORU) || defined(CONFIG_MACH_ENDEAVORTD) || defined(CONFIG_MACH_ERAU)
+		if(host->mmc->index==1)
+			endeavor_wifi_power(0);
+#endif
+		// HTC_WIFI_END
 	}
 
 	if (host->pwr == pwr)
@@ -1241,6 +1267,15 @@ static void sdhci_request(struct mmc_host *mmc, struct mmc_request *mrq)
 
 	if (!present || host->flags & SDHCI_DEVICE_DEAD) {
 		host->mrq->cmd->error = -ENOMEDIUM;
+		/* +++ 2011-10-25 Tommy Chen */
+		if (!present)
+			printk(KERN_INFO "%s: card is not present\n",
+				mmc_hostname(mmc));
+
+		if (host->flags & SDHCI_DEVICE_DEAD)
+			printk(KERN_ERR "%s: host is dead\n",
+				mmc_hostname(mmc));
+		/* --- */
 		tasklet_schedule(&host->finish_tasklet);
 	} else {
 		u32 present_state;
@@ -2011,6 +2046,9 @@ static void sdhci_timeout_timer(unsigned long data)
 			"interrupt.\n", mmc_hostname(host->mmc));
 		sdhci_dumpregs(host);
 
+		if(host->ops && host->ops->dump_irq_reg)
+			host->ops->dump_irq_reg(host);
+
 		if (host->data) {
 			host->data->error = -ETIMEDOUT;
 			sdhci_finish_data(host);
@@ -2051,6 +2089,7 @@ static void sdhci_tuning_timer(unsigned long data)
 static void sdhci_cmd_irq(struct sdhci_host *host, u32 intmask)
 {
 	BUG_ON(intmask == 0);
+	int opcode;
 
 	if (!host->cmd) {
 		printk(KERN_ERR "%s: Got command interrupt 0x%08x even "
@@ -2060,11 +2099,36 @@ static void sdhci_cmd_irq(struct sdhci_host *host, u32 intmask)
 		return;
 	}
 
-	if (intmask & SDHCI_INT_TIMEOUT)
+	opcode = host->cmd->opcode;
+	if (intmask & SDHCI_INT_TIMEOUT) {
+                if (host->mmc->card) {
+                        printk(KERN_ERR "%s: Got cmd intr: TIMEOUT, CMD(%d) ARG(0x%x)\n",
+                                mmc_hostname(host->mmc), host->cmd->opcode, host->cmd->arg);
+                } else {
+					if (host->mmc->index != 1) {
+						if (( host->mmc->index == 2 && (opcode != 1 || opcode != 5 || opcode != 52)) &&
+							( host->mmc->index == 0 && (opcode != 5 || opcode != 8 || opcode != 52 || opcode != 55)))
+                        printk(KERN_INFO "%s: CMD(%d) ARG(0x%x) timed out durning identification mode\n",
+                                mmc_hostname(host->mmc), host->cmd->opcode, host->cmd->arg);
+					}
+                }
 		host->cmd->error = -ETIMEDOUT;
-	else if (intmask & (SDHCI_INT_CRC | SDHCI_INT_END_BIT |
-			SDHCI_INT_INDEX))
+	} else if (intmask & (SDHCI_INT_CRC | SDHCI_INT_END_BIT |
+			SDHCI_INT_INDEX)) {
+		if (intmask & (SDHCI_INT_CRC))
+			printk(KERN_ERR "%s: Got cmd intr: CRC error, CMD(%d)\n",
+				mmc_hostname(host->mmc), host->cmd->opcode);
+
+		if (intmask & (SDHCI_INT_END_BIT))
+			printk(KERN_ERR "%s: Got cmd intr: END_BIT error, CMD(%d)\n",
+				mmc_hostname(host->mmc), host->cmd->opcode);
+
+		if (intmask & (SDHCI_INT_INDEX))
+			printk(KERN_ERR "%s: Got cmd intr: INDEX error, CMD(%d)\n",
+			mmc_hostname(host->mmc), host->cmd->opcode);
+
 		host->cmd->error = -EILSEQ;
+	}
 
 	if (host->cmd->error) {
 		tasklet_schedule(&host->finish_tasklet);
@@ -2161,15 +2225,33 @@ static void sdhci_data_irq(struct sdhci_host *host, u32 intmask)
 		return;
 	}
 
-	if (intmask & SDHCI_INT_DATA_TIMEOUT)
+	u32 opcode;
+	u32 argument;
+	if (host->data->mrq) {
+		if (host->data->mrq->cmd) {
+			opcode = host->data->mrq->cmd->opcode;
+			argument = host->data->mrq->cmd->arg;
+		}
+	} else {
+		opcode = 0;
+		argument = 0xffffffff;
+	}
+
+	if (intmask & SDHCI_INT_DATA_TIMEOUT) {
+		printk(KERN_ERR "%s: CMD(%d) ARG(0x%x), DATA_TIMEOUT(%u ns), blksz=%u, blocks=%u\n",
+			mmc_hostname(host->mmc), opcode, argument, host->data->timeout_ns, host->data->blksz, host->data->blocks);
 		host->data->error = -ETIMEDOUT;
-	else if (intmask & SDHCI_INT_DATA_END_BIT)
+	} else if (intmask & SDHCI_INT_DATA_END_BIT) {
+		printk(KERN_ERR "%s: DATA_END_BIT error\n",
+			mmc_hostname(host->mmc));
 		host->data->error = -EILSEQ;
-	else if ((intmask & SDHCI_INT_DATA_CRC) &&
+	} else if ((intmask & SDHCI_INT_DATA_CRC) &&
 		SDHCI_GET_CMD(sdhci_readw(host, SDHCI_COMMAND))
-			!= MMC_BUS_TEST_R)
+			!= MMC_BUS_TEST_R) {
+		printk(KERN_ERR "%s: CMD(%d) ARG(0x%x), DATA_CRC error\n",
+			mmc_hostname(host->mmc), opcode, argument);
 		host->data->error = -EILSEQ;
-	else if (intmask & SDHCI_INT_ADMA_ERROR) {
+	} else if (intmask & SDHCI_INT_ADMA_ERROR) {
 		printk(KERN_ERR "%s: ADMA error\n", mmc_hostname(host->mmc));
 		sdhci_show_adma_error(host);
 		host->data->error = -EIO;
@@ -2344,7 +2426,15 @@ int sdhci_suspend_host(struct sdhci_host *host, pm_message_t state)
 			host->tuning_count * HZ);
 	}
 
-	if (mmc->card) {
+/*HTC_WIFI_START*/
+#if defined(CONFIG_MACH_ENDEAVORU) || defined(CONFIG_MACH_ENDEAVORTD)
+	if (mmc->card) { //austin && (mmc->card->type != MMC_TYPE_SDIO))
+#else
+    if (mmc->card && (mmc->card->type != MMC_TYPE_SDIO)) {
+#endif
+/*HTC_WIFI_END*/
+
+
 		ret = mmc_suspend_host(host->mmc);
 		if (ret) {
 			if (has_tuning_timer) {
@@ -2399,7 +2489,30 @@ int sdhci_resume_host(struct sdhci_host *host)
 	sdhci_init(host, (host->mmc->pm_flags & MMC_PM_KEEP_POWER));
 	mmiowb();
 
-	if (mmc->card) {
+/*HTC_WIFI_START*/
+#if defined(CONFIG_MACH_ENDEAVORU) || defined(CONFIG_MACH_ENDEAVORTD)
+	if (mmc->card){
+		if (mmc->card->type != MMC_TYPE_SDIO) {
+			ret = mmc_resume_host(host->mmc);
+		} else {
+			printk("wifi_is_on: %d\n",wifi_is_on);
+            if (host->mmc->index == 1 && wifi_is_on == 1) {
+                printk("%s: host->mmc->index = %d, call mmc_resume_host()\n"
+                       , __func__,host->mmc->index);
+                ret = mmc_resume_host(host->mmc);
+            } else if (host->mmc->index == 1 && wifi_is_on != 1) {
+				if (host->ops->set_clock)
+					host->ops->set_clock(host, 0);
+			}
+		}
+		/* Enable card interrupt as it is overwritten in sdhci_init */
+		if ((mmc->caps & MMC_CAP_SDIO_IRQ) &&
+			(mmc->pm_flags & MMC_PM_KEEP_POWER))
+				if (host->card_int_set)
+					mmc->ops->enable_sdio_irq(mmc, true);
+	}
+#else
+    if (mmc->card && (mmc->card->type != MMC_TYPE_SDIO)){
 		ret = mmc_resume_host(host->mmc);
 		/* Enable card interrupt as it is overwritten in sdhci_init */
 		if ((mmc->caps & MMC_CAP_SDIO_IRQ) &&
@@ -2407,6 +2520,8 @@ int sdhci_resume_host(struct sdhci_host *host)
 				if (host->card_int_set)
 					mmc->ops->enable_sdio_irq(mmc, true);
 	}
+#endif
+/*HTC_WIFI_END*/
 
 	sdhci_enable_card_detection(host);
 
@@ -2480,6 +2595,7 @@ int sdhci_add_host(struct sdhci_host *host)
 	host->version = sdhci_readw(host, SDHCI_HOST_VERSION);
 	host->version = (host->version & SDHCI_SPEC_VER_MASK)
 				>> SDHCI_SPEC_VER_SHIFT;
+
 	if (host->version > SDHCI_SPEC_300) {
 		printk(KERN_ERR "%s: Unknown controller version (%d). "
 			"You may experience problems.\n", mmc_hostname(mmc),
@@ -2555,12 +2671,13 @@ int sdhci_add_host(struct sdhci_host *host)
 		mmc_dev(host->mmc)->dma_mask = &host->dma_mask;
 	}
 
-	if (host->version >= SDHCI_SPEC_300)
+	if (host->version >= SDHCI_SPEC_300) {
 		host->max_clk = (caps[0] & SDHCI_CLOCK_V3_BASE_MASK)
 			>> SDHCI_CLOCK_BASE_SHIFT;
-	else
+	} else {
 		host->max_clk = (caps[0] & SDHCI_CLOCK_BASE_MASK)
 			>> SDHCI_CLOCK_BASE_SHIFT;
+	}
 
 	host->max_clk *= 1000000;
 	if (host->max_clk == 0 || host->quirks &
@@ -2657,6 +2774,17 @@ int sdhci_add_host(struct sdhci_host *host)
 	if ((host->quirks & SDHCI_QUIRK_BROKEN_CARD_DETECTION) &&
 	    mmc_card_is_removable(mmc) && !(host->ops->get_cd))
 		mmc->caps |= MMC_CAP_NEEDS_POLL;
+#if defined(CONFIG_MACH_ENDEAVORU) || defined(CONFIG_MACH_ENDEAVORTD) || defined(CONFIG_MACH_ERAU)
+	/* HTC_WIFI_START */
+	if(host->mmc->index==1) {
+		mmc->caps |= MMC_CAP_NONREMOVABLE;
+		mmc->caps |= MMC_CAP_DISABLE;
+		mmc->caps |= MMC_CAP_POWER_OFF_CARD;
+		mmc->caps |= MMC_PM_KEEP_POWER;
+        host->flags |= MMC_PM_KEEP_POWER;
+	}
+	/* HTC_WIFI_END */
+#endif
 
 	/* UHS-I mode(s) supported by the host controller. */
 	if (host->version >= SDHCI_SPEC_300)

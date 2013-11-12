@@ -227,6 +227,28 @@ extern struct ctl_table epoll_table[];
 int sysctl_legacy_va_layout;
 #endif
 
+#ifdef CONFIG_NO_HZ
+int sysctl_jiffies_per_tick = 1;
+extern ktime_t tick_period;
+extern int jiffies_per_tick;
+extern int jiffies_per_tick_handler(struct ctl_table *table, int write,
+		void __user *buffer, size_t *lenp,
+		loff_t *ppos)
+{
+	int ret;
+
+	ret = proc_dointvec_minmax(table, write, buffer, lenp, ppos);
+	if (ret == 0 && write) {
+		if (sysctl_jiffies_per_tick > 0 && sysctl_jiffies_per_tick < HZ) {
+			jiffies_per_tick = sysctl_jiffies_per_tick;
+			tick_period = ktime_set(0, jiffies_per_tick * (NSEC_PER_SEC / HZ));
+		}
+	}
+	return ret;
+}
+
+#endif
+
 /* The default sysctl tables: */
 
 static struct ctl_table root_table[] = {
@@ -985,6 +1007,19 @@ static struct ctl_table kern_table[] = {
 		.proc_handler	= proc_dointvec,
 	},
 #endif
+#ifdef CONFIG_NO_HZ
+	{
+		.procname	= "jiffies_per_tick",
+		.data		= &sysctl_jiffies_per_tick,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= jiffies_per_tick_handler,
+},
+#endif
+/*
+ * NOTE: do not add new entries to this table unless you have read
+ * Documentation/sysctl/ctl_unnumbered.txt
+ */
 	{ }
 };
 

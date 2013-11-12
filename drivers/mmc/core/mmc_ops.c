@@ -398,6 +398,9 @@ int mmc_switch(struct mmc_card *card, u8 set, u8 index, u8 value,
 	if (err)
 		return err;
 
+	/* Sandisk iNAND needs this delay */
+	mmc_delay(1);
+
 	/* Must check status to be sure of no errors */
 	do {
 		err = mmc_send_status(card, &status);
@@ -556,11 +559,13 @@ int mmc_send_hpi_cmd(struct mmc_card *card, u32 *status)
 	int err;
 
 	opcode = card->ext_csd.hpi_cmd;
-	flags = MMC_RSP_R1 | MMC_CMD_AC;
+	flags = MMC_RSP_R1B | MMC_CMD_AC;
 
 	cmd.opcode = opcode;
 	cmd.arg = card->rca << 16 | 1;
 	cmd.flags = flags;
+	cmd.cmd_timeout_ms = card->ext_csd.out_of_int_time;
+
 
 	err = mmc_wait_for_cmd(card->host, &cmd, 0);
 	if (err) {
@@ -599,6 +604,9 @@ int mmc_send_bk_ops_cmd(struct mmc_card *card, bool is_synchronous)
 	err = mmc_wait_for_cmd(card->host, &cmd, MMC_CMD_RETRIES);
 	if (err)
 		return err;
+
+	if (!is_synchronous)
+		return 0;
 
 	/* Must check status to be sure of no errors */
 	do {

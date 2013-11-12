@@ -84,6 +84,7 @@ static void tegra_mc_timing_save(void)
 		*ctx++ = readl((u32)mc + off);
 
 	*ctx++ = readl((u32)mc + MC_INT_MASK);
+
 }
 
 void tegra_mc_timing_restore(void)

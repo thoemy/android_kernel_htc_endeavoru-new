@@ -38,7 +38,9 @@
 #include <mach/dc.h>
 #include <mach/fb.h>
 #include <linux/nvhost.h>
+#include <linux/disp_debug.h>
 #include <mach/hdmi-audio.h>
+#include <mach/cable_detect.h>
 
 #include <video/tegrafb.h>
 
@@ -48,6 +50,11 @@
 #include "hdmi.h"
 #include "edid.h"
 #include "nvhdcp.h"
+extern bool g_bEnterEarlySuspend;
+bool deepsleep = false;
+bool earlysleep = false;
+/* Enable HDMI Debug Flag */
+#define HDMI_DEBUG 1
 
 /* datasheet claims this will always be 216MHz */
 #define HDMI_AUDIOCLK_FREQ		216000000
@@ -1364,18 +1371,27 @@ bool tegra_dc_hdmi_detect_test(struct tegra_dc *dc, unsigned char *edid_ptr)
 	struct tegra_dc_hdmi_data *hdmi = tegra_dc_get_outdata(dc);
 
 	if (!hdmi || !edid_ptr) {
+#if HDMI_DEBUG
+		printk("HDMI_DEBUG: HDMI test failed to get arguments.\n");
+#endif
 		dev_err(&dc->ndev->dev, "HDMI test failed to get arguments.\n");
 		return false;
 	}
 
 	err = tegra_edid_get_monspecs_test(hdmi->edid, &specs, edid_ptr);
 	if (err < 0) {
+#if HDMI_DEBUG
+		printk("HDMI_DEBUG: error reading edid\n");
+#endif
 		dev_err(&dc->ndev->dev, "error reading edid\n");
 		goto fail;
 	}
 
 	err = tegra_edid_get_eld(hdmi->edid, &hdmi->eld);
 	if (err < 0) {
+#if HDMI_DEBUG
+		printk("HDMI_DEBUG: error populating eld\n");
+#endif
 		dev_err(&dc->ndev->dev, "error populating eld\n");
 		goto fail;
 	}
@@ -1406,12 +1422,18 @@ static bool tegra_dc_hdmi_detect(struct tegra_dc *dc)
 
 	err = tegra_edid_get_monspecs(hdmi->edid, &specs);
 	if (err < 0) {
+#if HDMI_DEBUG
+		printk("HDMI_DEBUG: error reading edid\n");
+#endif
 		dev_err(&dc->ndev->dev, "error reading edid\n");
 		goto fail;
 	}
 
 	err = tegra_edid_get_eld(hdmi->edid, &hdmi->eld);
 	if (err < 0) {
+#if HDMI_DEBUG
+		printk("HDMI_DEBUG: error populating eld\n");
+#endif
 		dev_err(&dc->ndev->dev, "error populating eld\n");
 		goto fail;
 	}
@@ -1454,6 +1476,11 @@ static irqreturn_t tegra_dc_hdmi_irq(int irq, void *ptr)
 	struct tegra_dc_hdmi_data *hdmi = tegra_dc_get_outdata(dc);
 	unsigned long flags;
 
+	if (g_bEnterEarlySuspend)
+		earlysleep = 1;
+	else
+		earlysleep = deepsleep = 0;
+
 	spin_lock_irqsave(&hdmi->suspend_lock, flags);
 	if (!hdmi->suspended) {
 		__cancel_delayed_work(&hdmi->work);
@@ -1474,7 +1501,12 @@ static void tegra_dc_hdmi_suspend(struct tegra_dc *dc)
 	struct tegra_dc_hdmi_data *hdmi = tegra_dc_get_outdata(dc);
 	unsigned long flags;
 
+#ifdef CONFIG_TEGRA_HDMI_MHL
+	/* move to hdmi_hdcp_early_suspend and called by sii9234_early_suspend */
+	//tegra_nvhdcp_suspend(hdmi->nvhdcp);
+#else
 	tegra_nvhdcp_suspend(hdmi->nvhdcp);
+#endif
 	spin_lock_irqsave(&hdmi->suspend_lock, flags);
 	hdmi->suspended = true;
 	spin_unlock_irqrestore(&hdmi->suspend_lock, flags);
@@ -1487,6 +1519,7 @@ static void tegra_dc_hdmi_resume(struct tegra_dc *dc)
 
 	spin_lock_irqsave(&hdmi->suspend_lock, flags);
 	hdmi->suspended = false;
+	deepsleep = 1;
 
 	if (tegra_dc_hdmi_hpd(dc))
 		queue_delayed_work(system_nrt_wq, &hdmi->work,
@@ -1496,7 +1529,37 @@ static void tegra_dc_hdmi_resume(struct tegra_dc *dc)
 				   msecs_to_jiffies(30));
 
 	spin_unlock_irqrestore(&hdmi->suspend_lock, flags);
+#ifdef CONFIG_TEGRA_HDMI_MHL
+	/* move to hdmi_hdcp_late_resume and called by sii9234_late_resume */
+	//tegra_nvhdcp_resume(hdmi->nvhdcp);
+#else
 	tegra_nvhdcp_resume(hdmi->nvhdcp);
+#endif
+}
+
+void hdmi_hdcp_early_suspend()
+{
+	struct tegra_dc *dc_hdmi = tegra_dc_get_dc(1);
+	struct tegra_dc_hdmi_data *hdmi = tegra_dc_get_outdata(dc_hdmi);
+	tegra_nvhdcp_suspend(hdmi->nvhdcp);
+}
+
+void hdmi_set_hdmi_uevent (int value)
+{
+	struct tegra_dc *dc_hdmi = tegra_dc_get_dc(1);
+	struct tegra_dc_hdmi_data *hdmi = tegra_dc_get_outdata(dc_hdmi);
+	//switch_set_state(&hdmi->hpd_switch, value);
+}
+
+void hdmi_hdcp_late_resume()
+{
+	struct tegra_dc *dc_hdmi = tegra_dc_get_dc(1);
+	struct tegra_dc_hdmi_data *hdmi = tegra_dc_get_outdata(dc_hdmi);
+	if(!earlysleep && !deepsleep)
+		hdmi_set_hdmi_uevent(0);
+	tegra_nvhdcp_resume(hdmi->nvhdcp);
+	if(!earlysleep && !deepsleep)
+		hdmi_set_hdmi_uevent(1);
 }
 
 #ifdef CONFIG_SWITCH
@@ -1535,6 +1598,9 @@ static int tegra_dc_hdmi_init(struct tegra_dc *dc)
 
 	res = nvhost_get_resource_byname(dc->ndev, IORESOURCE_MEM, "hdmi_regs");
 	if (!res) {
+#if HDMI_DEBUG
+		printk("HDMI_DEBUG: hdmi: no mem resource\n");
+#endif
 		dev_err(&dc->ndev->dev, "hdmi: no mem resource\n");
 		err = -ENOENT;
 		goto err_free_hdmi;
@@ -1542,6 +1608,9 @@ static int tegra_dc_hdmi_init(struct tegra_dc *dc)
 
 	base_res = request_mem_region(res->start, resource_size(res), dc->ndev->name);
 	if (!base_res) {
+#if HDMI_DEBUG
+		printk("HDMI_DEBUG: hdmi: request_mem_region failed\n");
+#endif
 		dev_err(&dc->ndev->dev, "hdmi: request_mem_region failed\n");
 		err = -EBUSY;
 		goto err_free_hdmi;
@@ -1549,6 +1618,9 @@ static int tegra_dc_hdmi_init(struct tegra_dc *dc)
 
 	base = ioremap(res->start, resource_size(res));
 	if (!base) {
+#if HDMI_DEBUG
+		printk("HDMI_DEBUG: hdmi: registers can't be mapped\n");
+#endif
 		dev_err(&dc->ndev->dev, "hdmi: registers can't be mapped\n");
 		err = -EBUSY;
 		goto err_release_resource_reg;
@@ -1556,6 +1628,9 @@ static int tegra_dc_hdmi_init(struct tegra_dc *dc)
 
 	clk = clk_get(&dc->ndev->dev, "hdmi");
 	if (IS_ERR_OR_NULL(clk)) {
+#if HDMI_DEBUG
+		printk("HDMI_DEBUG: hdmi: can't get clock\n");
+#endif
 		dev_err(&dc->ndev->dev, "hdmi: can't get clock\n");
 		err = -ENOENT;
 		goto err_iounmap_reg;
@@ -1563,6 +1638,9 @@ static int tegra_dc_hdmi_init(struct tegra_dc *dc)
 
 	disp1_clk = clk_get_sys("tegradc.0", NULL);
 	if (IS_ERR_OR_NULL(disp1_clk)) {
+#if HDMI_DEBUG
+		printk("HDMI_DEBUG: hdmi: can't disp1 clock\n");
+#endif
 		dev_err(&dc->ndev->dev, "hdmi: can't disp1 clock\n");
 		err = -ENOENT;
 		goto err_put_clock;
@@ -1570,6 +1648,9 @@ static int tegra_dc_hdmi_init(struct tegra_dc *dc)
 
 	disp2_clk = clk_get_sys("tegradc.1", NULL);
 	if (IS_ERR_OR_NULL(disp2_clk)) {
+#if HDMI_DEBUG
+		printk("HDMI_DEBUG: hdmi: can't disp2 clock\n");
+#endif
 		dev_err(&dc->ndev->dev, "hdmi: can't disp2 clock\n");
 		err = -ENOENT;
 		goto err_put_clock;
@@ -1578,6 +1659,9 @@ static int tegra_dc_hdmi_init(struct tegra_dc *dc)
 #if !defined(CONFIG_ARCH_TEGRA_2x_SOC)
 	hdmi->hda_clk = clk_get_sys("tegra30-hda", "hda");
 	if (IS_ERR_OR_NULL(hdmi->hda_clk)) {
+#if HDMI_DEBUG
+		printk("HDMI_DEBUG: hdmi: can't get hda clock\n");
+#endif
 		dev_err(&dc->ndev->dev, "hdmi: can't get hda clock\n");
 		err = -ENOENT;
 		goto err_put_clock;
@@ -1585,6 +1669,9 @@ static int tegra_dc_hdmi_init(struct tegra_dc *dc)
 
 	hdmi->hda2codec_clk = clk_get_sys("tegra30-hda", "hda2codec");
 	if (IS_ERR_OR_NULL(hdmi->hda2codec_clk)) {
+#if HDMI_DEBUG
+		printk("HDMI_DEBUG: hdmi: can't get hda2codec clock\n");
+#endif
 		dev_err(&dc->ndev->dev, "hdmi: can't get hda2codec clock\n");
 		err = -ENOENT;
 		goto err_put_clock;
@@ -1592,6 +1679,9 @@ static int tegra_dc_hdmi_init(struct tegra_dc *dc)
 
 	hdmi->hda2hdmi_clk = clk_get_sys("tegra30-hda", "hda2hdmi");
 	if (IS_ERR_OR_NULL(hdmi->hda2hdmi_clk)) {
+#if HDMI_DEBUG
+		printk("HDMI_DEBUG: hdmi: can't get hda2hdmi clock\n");
+#endif
 		dev_err(&dc->ndev->dev, "hdmi: can't get hda2hdmi clock\n");
 		err = -ENOENT;
 		goto err_put_clock;
@@ -1602,6 +1692,10 @@ static int tegra_dc_hdmi_init(struct tegra_dc *dc)
 	if (request_irq(gpio_to_irq(dc->out->hotplug_gpio), tegra_dc_hdmi_irq,
 			IRQF_DISABLED | IRQF_TRIGGER_RISING | IRQF_TRIGGER_FALLING,
 			dev_name(&dc->ndev->dev), dc)) {
+#if HDMI_DEBUG
+		printk("HDMI_DEBUG: hdmi: request_irq %d failed\n",
+			gpio_to_irq(dc->out->hotplug_gpio));
+#endif
 		dev_err(&dc->ndev->dev, "hdmi: request_irq %d failed\n",
 			gpio_to_irq(dc->out->hotplug_gpio));
 		err = -EBUSY;
@@ -1610,6 +1704,9 @@ static int tegra_dc_hdmi_init(struct tegra_dc *dc)
 
 	hdmi->edid = tegra_edid_create(dc->out->dcc_bus);
 	if (IS_ERR_OR_NULL(hdmi->edid)) {
+#if HDMI_DEBUG
+		printk("HDMI_DEBUG: hdmi: can't create edid\n");
+#endif
 		dev_err(&dc->ndev->dev, "hdmi: can't create edid\n");
 		err = PTR_ERR(hdmi->edid);
 		goto err_free_irq;
@@ -1619,6 +1716,9 @@ static int tegra_dc_hdmi_init(struct tegra_dc *dc)
 	hdmi->nvhdcp = tegra_nvhdcp_create(hdmi, dc->ndev->id,
 			dc->out->dcc_bus);
 	if (IS_ERR_OR_NULL(hdmi->nvhdcp)) {
+#if HDMI_DEBUG
+		printk("HDMI_DEBUG: hdmi: can't create nvhdcp\n");
+#endif
 		dev_err(&dc->ndev->dev, "hdmi: can't create nvhdcp\n");
 		err = PTR_ERR(hdmi->nvhdcp);
 		goto err_edid_destroy;
@@ -1669,10 +1769,8 @@ static int tegra_dc_hdmi_init(struct tegra_dc *dc)
 
 	return 0;
 
-#ifdef CONFIG_TEGRA_NVHDCP
 err_edid_destroy:
 	tegra_edid_destroy(hdmi->edid);
-#endif
 err_free_irq:
 	free_irq(gpio_to_irq(dc->out->hotplug_gpio), dc);
 err_put_clock:
@@ -1869,6 +1967,10 @@ static int tegra_dc_hdmi_setup_audio(struct tegra_dc *dc, unsigned audio_freq,
 #endif
 	config = tegra_hdmi_get_audio_config(audio_freq, dc->mode.pclk);
 	if (!config) {
+#if HDMI_DEBUG
+		printk("HDMI_DEBUG: hdmi: can't set audio to %d at %d pix_clock",
+			audio_freq, dc->mode.pclk);
+#endif
 		dev_err(&dc->ndev->dev,
 			"hdmi: can't set audio to %d at %d pix_clock",
 			audio_freq, dc->mode.pclk);
@@ -1985,7 +2087,7 @@ EXPORT_SYMBOL(tegra_hdmi_audio_null_sample_inject);
 int tegra_hdmi_setup_hda_presence()
 {
 	struct tegra_dc_hdmi_data *hdmi = dc_hdmi;
-
+	printk(KERN_INFO "ENTERING tegra_hdmi_setup_hda_presence()");
 	if (!hdmi)
 		return -EAGAIN;
 
@@ -2058,6 +2160,8 @@ static void tegra_dc_hdmi_setup_avi_infoframe(struct tegra_dc *dc, bool dvi)
 	struct tegra_dc_hdmi_data *hdmi = tegra_dc_get_outdata(dc);
 	struct hdmi_avi_infoframe avi;
 
+	tegra_dc_writel(hdmi->dc, 0x00000000, DC_DISP_BORDER_COLOR);
+
 	if (dvi) {
 		tegra_hdmi_writel(hdmi, 0x0,
 				  HDMI_NV_PDISP_HDMI_AVI_INFOFRAME_CTRL);
@@ -2080,6 +2184,8 @@ static void tegra_dc_hdmi_setup_avi_infoframe(struct tegra_dc *dc, bool dvi)
 		} else {
 			avi.m = HDMI_AVI_M_16_9;
 			avi.vic = 3;
+			avi.q = tegra_edid_vcdb_supported(hdmi->edid);
+			tegra_dc_writel(hdmi->dc, 0x00101010, DC_DISP_BORDER_COLOR);
 		}
 	} else if (dc->mode.v_active == 576) {
 		/* CEC modes 17 and 18 differ only by the pysical size of the

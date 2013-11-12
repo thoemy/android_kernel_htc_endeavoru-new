@@ -447,25 +447,33 @@ static int tegra30_i2s_tdm_hw_params(struct snd_pcm_substream *substream,
 		val |= TEGRA30_AUDIOCIF_CTRL_DIRECTION_RX;
 		tegra30_i2s_write(i2s, TEGRA30_I2S_CIF_RX_CTRL, val);
 
-		tegra30_ahub_set_tx_cif_channels(i2s->txcif,
+		if(i2s->txcif >= TEGRA30_AHUB_TXCIF_APBIF_TX0 && i2s->txcif <= TEGRA30_AHUB_TXCIF_SPDIF_TX1) {
+			tegra30_ahub_set_tx_cif_channels(i2s->txcif,
 						i2s_audio_ch,
 						i2s_client_ch);
-		tegra30_ahub_set_tx_cif_bits(i2s->txcif,
+			tegra30_ahub_set_tx_cif_bits(i2s->txcif,
 						i2s_audio_bits,
 						i2s_client_bits);
-		tegra30_ahub_set_tx_fifo_pack_mode(i2s->txcif, 0);
+			tegra30_ahub_set_tx_fifo_pack_mode(i2s->txcif, 0);
+		} else {
+			dev_err(dev, "i2s->txcif out of range!\n");
+		}
 
 	} else {
 		val |= TEGRA30_AUDIOCIF_CTRL_DIRECTION_TX;
 		tegra30_i2s_write(i2s, TEGRA30_I2S_CIF_TX_CTRL, val);
 
-		tegra30_ahub_set_rx_cif_channels(i2s->rxcif,
+		if(i2s->rxcif >= TEGRA30_AHUB_RXCIF_APBIF_RX0 && i2s->rxcif <= TEGRA30_AHUB_RXCIF_SPDIF_RX1) {
+			tegra30_ahub_set_rx_cif_channels(i2s->rxcif,
 						i2s_audio_ch,
 						i2s_client_ch);
-		tegra30_ahub_set_rx_cif_bits(i2s->rxcif,
+			tegra30_ahub_set_rx_cif_bits(i2s->rxcif,
 						i2s_audio_bits,
 						i2s_client_bits);
-		tegra30_ahub_set_rx_fifo_pack_mode(i2s->rxcif, 0);
+			tegra30_ahub_set_rx_fifo_pack_mode(i2s->rxcif, 0);
+		} else {
+			dev_err(dev, "i2s->rxcif out of range!\n");
+		}
 	}
 
 	tegra30_i2s_set_slot_control(i2s, substream->stream);
@@ -585,17 +593,23 @@ static int tegra30_i2s_hw_params(struct snd_pcm_substream *substream,
 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
 		val |= TEGRA30_AUDIOCIF_CTRL_DIRECTION_RX;
 		tegra30_i2s_write(i2s, TEGRA30_I2S_CIF_RX_CTRL, val);
-
-		tegra30_ahub_set_tx_cif_channels(i2s->txcif,
+		if(i2s->txcif >= TEGRA30_AHUB_TXCIF_APBIF_TX0 && i2s->txcif <= TEGRA30_AHUB_TXCIF_SPDIF_TX1) {
+			tegra30_ahub_set_tx_cif_channels(i2s->txcif,
 						 params_channels(params),
 						 params_channels(params));
+		} else {
+			dev_err(dev, "i2s->txcif out of range\n");
+		}
 	} else {
 		val |= TEGRA30_AUDIOCIF_CTRL_DIRECTION_TX;
 		tegra30_i2s_write(i2s, TEGRA30_I2S_CIF_TX_CTRL, val);
-
-		tegra30_ahub_set_rx_cif_channels(i2s->rxcif,
+		if(i2s->rxcif >= TEGRA30_AHUB_RXCIF_APBIF_RX0 && i2s->rxcif <= TEGRA30_AHUB_RXCIF_SPDIF_RX1) {
+			tegra30_ahub_set_rx_cif_channels(i2s->rxcif,
 						 params_channels(params),
 						 params_channels(params));
+		} else {
+			dev_err(dev, "i2s->rxcif out of range\n");
+		}
 	}
 
 	val = (1 << TEGRA30_I2S_OFFSET_RX_DATA_OFFSET_SHIFT) |
@@ -1148,7 +1162,8 @@ static int __devexit tegra30_i2s_platform_remove(struct platform_device *pdev)
 	iounmap(i2s->regs);
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	release_mem_region(res->start, resource_size(res));
+	if(res != NULL)
+		release_mem_region(res->start, resource_size(res));
 
 	clk_put(i2s->clk_pll_a_out0);
 	clk_put(i2s->clk_audio_2x);

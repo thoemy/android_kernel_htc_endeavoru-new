@@ -142,7 +142,7 @@ static struct nvhost_device tegra_gr2d02_device = {
 	.waitbases	= BIT(NVWAITBASE_2D_0) | BIT(NVWAITBASE_2D_1),
 	.modulemutexes	= BIT(NVMODMUTEX_2D_FULL) | BIT(NVMODMUTEX_2D_SIMPLE) |
 			  BIT(NVMODMUTEX_2D_SB_A) | BIT(NVMODMUTEX_2D_SB_B),
-	.clocks		= { {"gr2d", UINT_MAX},
+	.clocks		= { {"gr2d", 0},
 			  {"epp", 0},
 			  {"emc", 300000000} },
 	NVHOST_MODULE_NO_POWERGATE_IDS,
@@ -163,8 +163,8 @@ static struct resource isp_resources_t20[] = {
 static struct nvhost_device tegra_isp01_device = {
 	.name		= "isp",
 	.id		= -1,
-	.resource = isp_resources_t20,
-	.num_resources = ARRAY_SIZE(isp_resources_t20),
+        .resource = isp_resources_t20,
+        .num_resources = ARRAY_SIZE(isp_resources_t20),
 	.index		= 3,
 	.syncpts	= BIT(NVSYNCPT_VI_ISP_2) | BIT(NVSYNCPT_VI_ISP_3) |
 			  BIT(NVSYNCPT_VI_ISP_4),
@@ -177,21 +177,21 @@ static struct nvhost_device tegra_isp01_device = {
 };
 
 static struct resource vi_resources[] = {
-	{
-		.name = "regs",
-		.start = TEGRA_VI_BASE,
-		.end = TEGRA_VI_BASE + TEGRA_VI_SIZE - 1,
-		.flags = IORESOURCE_MEM,
-	},
+        {
+                .name = "regs",
+                .start = TEGRA_VI_BASE,
+                .end = TEGRA_VI_BASE + TEGRA_VI_SIZE - 1,
+                .flags = IORESOURCE_MEM,
+        },
 };
 
 static struct nvhost_device tegra_vi01_device = {
 	.name		= "vi",
-	.resource = vi_resources,
-	.num_resources = ARRAY_SIZE(vi_resources),
+        .resource = vi_resources,
+        .num_resources = ARRAY_SIZE(vi_resources),
 	.id		= -1,
 	.index		= 4,
-	.syncpts	= BIT(NVSYNCPT_CSI_VI_0) | BIT(NVSYNCPT_CSI_VI_1) |
+	.syncpts 	= BIT(NVSYNCPT_CSI_VI_0) | BIT(NVSYNCPT_CSI_VI_1) |
 			  BIT(NVSYNCPT_VI_ISP_0) | BIT(NVSYNCPT_VI_ISP_1) |
 			  BIT(NVSYNCPT_VI_ISP_2) | BIT(NVSYNCPT_VI_ISP_3) |
 			  BIT(NVSYNCPT_VI_ISP_4),

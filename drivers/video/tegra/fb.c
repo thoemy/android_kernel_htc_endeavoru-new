@@ -36,6 +36,7 @@
 
 #include <mach/dc.h>
 #include <mach/fb.h>
+#include <mach/board_htc.h>
 #include <linux/nvhost.h>
 #include <linux/nvmap.h>
 
@@ -43,9 +44,15 @@
 #include "nvmap/nvmap.h"
 #include "dc/dc_priv.h"
 
+#define ONMODE_CHARGE() ((board_mfg_mode() == BOARD_MFG_MODE_NORMAL) && \
+							(board_zchg_mode() & 0x2) && \
+							(dc == tegra_fb->win->dc))
+
+
 /* Pad pitch to 16-byte boundary. */
 #define TEGRA_LINEAR_PITCH_ALIGNMENT 32
 
+struct tegra_usb_projector_info usb_pjt_info;
 struct tegra_fb_info {
 	struct tegra_dc_win	*win;
 	struct nvhost_device	*ndev;
@@ -326,6 +333,24 @@ static int tegra_fb_pan_display(struct fb_var_screeninfo *var,
 	char __iomem *flush_end;
 	u32 addr;
 
+	int i;
+	struct tegra_dc *dc = tegra_dc_get_dc(0);
+	/*
+	This is only for china sku suspend/resume battery update and only for DC0
+	Initialize window. It wouldn't support yuv in framebuffer.
+	Therefore, we set RGBX as default and disable the other windows.
+	*/
+	struct tegra_dc_win *dcwins[DC_N_WINDOWS];
+	if (ONMODE_CHARGE()) {
+		for (i = 0; i < DC_N_WINDOWS; i++) {
+			dcwins[i] = tegra_dc_get_window(tegra_fb->win->dc, i);
+			dcwins[i]->fmt = TEGRA_WIN_FMT_R8G8B8A8;
+			if (tegra_fb->win != dcwins[i])
+				dcwins[i]->flags &= ~TEGRA_WIN_FLAG_ENABLED;
+			else
+				dcwins[i]->flags |= TEGRA_WIN_FLAG_ENABLED;
+		}
+	}
 	if (!tegra_fb->win->cur_handle) {
 		flush_start = info->screen_base + (var->yoffset * info->fix.line_length);
 		flush_end = flush_start + (var->yres * info->fix.line_length);
@@ -340,10 +365,26 @@ static int tegra_fb_pan_display(struct fb_var_screeninfo *var,
 		tegra_fb->win->flags = TEGRA_WIN_FLAG_ENABLED;
 		tegra_fb->win->virt_addr = info->screen_base;
 
-		tegra_dc_update_windows(&tegra_fb->win, 1);
-		tegra_dc_sync_windows(&tegra_fb->win, 1);
+		tegra_fb->win->x.full = dfixed_const(0);
+		tegra_fb->win->y.full = dfixed_const(0);
+		tegra_fb->win->w.full = dfixed_const(var->xres);
+		tegra_fb->win->h.full = dfixed_const(var->yres);
+		tegra_fb->win->out_x = 0;
+		tegra_fb->win->out_y = 0;
+		tegra_fb->win->out_w = var->xres;
+		tegra_fb->win->out_h = var->yres;
+		tegra_fb->win->z = 0;
+		tegra_fb->win->stride = info->fix.line_length;
+		if (ONMODE_CHARGE()) {
+			/*Update all of windows, not only window a, b or c*/
+			tegra_dc_update_windows(dcwins, DC_N_WINDOWS);
+			tegra_dc_sync_windows(dcwins, DC_N_WINDOWS);
+		}
+		else {
+			tegra_dc_update_windows(&tegra_fb->win, 1);
+			tegra_dc_sync_windows(&tegra_fb->win, 1);
+		}
 	}
-
 	return 0;
 }
 
@@ -369,10 +410,13 @@ static int tegra_fb_ioctl(struct fb_info *info, unsigned int cmd, unsigned long 
 {
 	struct tegra_fb_info *tegra_fb = (struct tegra_fb_info *)info->par;
 	struct tegra_fb_modedb modedb;
+	void __user *argp = (void __user *)arg;
 	struct fb_modelist *modelist;
 	struct fb_vblank vblank = {};
 	int i;
 
+	int ret = 0;
+	struct tegra_usb_projector_info tmp_info;
 	switch (cmd) {
 	case FBIO_TEGRA_GET_MODEDB:
 		if (copy_from_user(&modedb, (void __user *)arg, sizeof(modedb)))
@@ -412,6 +456,17 @@ static int tegra_fb_ioctl(struct fb_info *info, unsigned int cmd, unsigned long 
 		if (copy_to_user((void __user *)arg, &modedb, sizeof(modedb)))
 			return -EFAULT;
 		break;
+       case FBIO_TEGRA_GET_USB_PROJECTOR_INFO:
+               ret = copy_to_user(argp, &usb_pjt_info, sizeof(usb_pjt_info));
+               if (ret)
+                       return ret;
+               break;
+       case FBIO_TEGRA_SET_USB_PROJECTOR_INFO:
+               ret = copy_from_user(&tmp_info, argp, sizeof(tmp_info));
+               usb_pjt_info.latest_offset = tmp_info.latest_offset;
+               if (ret)
+                       return ret;
+               break;
 
 	case FBIOGET_VBLANK:
 		tegra_dc_get_fbvblank(tegra_fb->win->dc, &vblank);

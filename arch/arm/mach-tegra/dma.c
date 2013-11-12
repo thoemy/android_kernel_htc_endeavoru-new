@@ -33,6 +33,7 @@
 #include <mach/irqs.h>
 #include <mach/iomap.h>
 #include <mach/clk.h>
+#include <linux/cpumask.h>
 
 #define APB_DMA_GEN				0x000
 #define GEN_ENABLE				(1<<31)
@@ -139,6 +140,7 @@ struct tegra_dma_channel {
 	dma_callback		callback;
 	struct tegra_dma_req	*cb_req;
 	dma_isr_handler		isr_handler;
+	struct cpumask          cpu_affinity_mask;
 };
 
 #define  NV_DMA_MAX_CHANNELS  32
@@ -1122,6 +1124,13 @@ int __init tegra_dma_init(void)
 				irq, i);
 			goto fail;
 		}
+#ifdef CONFIG_SMP
+        if (irq == INT_APB_DMA_CH5) {
+            cpumask_setall(&(dma_channels[i].cpu_affinity_mask));
+            irq_set_affinity_hint(irq, &(dma_channels[i].cpu_affinity_mask));
+            irq_set_affinity(irq, &(dma_channels[i].cpu_affinity_mask));
+        }
+#endif
 		ch->irq = irq;
 
 		__clear_bit(i, channel_usage);

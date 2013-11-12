@@ -796,7 +796,8 @@ static int setup_dma(struct tegra_dtv_context *dtv_ctx)
 					 DMA_FROM_DEVICE);
 			dtv_ctx->stream.buf_phy[i] = 0;
 		}
-		tegra_dma_free_channel(dtv_ctx->stream.dma_chan);
+		if (dtv_ctx->stream.dma_chan)
+			tegra_dma_free_channel(dtv_ctx->stream.dma_chan);
 		dtv_ctx->stream.dma_chan = 0;
 
 		return ret;

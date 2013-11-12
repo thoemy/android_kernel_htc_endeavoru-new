@@ -604,6 +604,7 @@ EXPORT_SYMBOL_HDA(snd_hda_get_conn_index);
  */
 int snd_hda_queue_unsol_event(struct hda_bus *bus, u32 res, u32 res_ex)
 {
+	printk(KERN_INFO "ENTERING snd_hda_queue_unsol_event()");
 	struct hda_bus_unsolicited *unsol;
 	unsigned int wp;
 
@@ -629,6 +630,7 @@ EXPORT_SYMBOL_HDA(snd_hda_queue_unsol_event);
  */
 static void process_unsol_events(struct work_struct *work)
 {
+	printk(KERN_INFO "ENTERING process_unsol_events\n");
 	struct hda_bus_unsolicited *unsol =
 		container_of(work, struct hda_bus_unsolicited, work);
 	struct hda_bus *bus = unsol->bus;
@@ -654,6 +656,7 @@ static void process_unsol_events(struct work_struct *work)
  */
 static int init_unsol_queue(struct hda_bus *bus)
 {
+	printk(KERN_INFO "ENTERING init_unsol_queue");
 	struct hda_bus_unsolicited *unsol;
 
 	if (bus->unsol) /* already initialized */
@@ -1344,7 +1347,7 @@ EXPORT_SYMBOL_HDA(snd_hda_codec_new);
 int snd_hda_codec_configure(struct hda_codec *codec)
 {
 	int err;
-
+	printk(KERN_INFO "ENTERING snd_hda_codec_configure()\n");
 	codec->preset = find_codec_preset(codec);
 	if (!codec->vendor_name || !codec->chip_name) {
 		err = get_codec_name(codec);
@@ -3348,6 +3351,7 @@ static void hda_call_codec_suspend(struct hda_codec *codec)
  */
 static void hda_call_codec_resume(struct hda_codec *codec)
 {
+	printk(KERN_INFO "ENTERING hda_call_codec_resume");
 	hda_set_power_state(codec,
 			    codec->afg ? codec->afg : codec->mfg,
 			    AC_PWRST_D0);
@@ -3397,6 +3401,7 @@ EXPORT_SYMBOL_HDA(snd_hda_build_controls);
 
 int snd_hda_codec_build_controls(struct hda_codec *codec)
 {
+	printk(KERN_INFO "ENTERING snd_hda_codec_build_controls");
 	int err = 0;
 	hda_exec_init_verbs(codec);
 	/* continue to initialize... */
@@ -4164,6 +4169,9 @@ void snd_hda_power_up(struct hda_codec *codec)
 {
 	struct hda_bus *bus = codec->bus;
 
+	if(cancel_delayed_work(&codec->power_work)){
+		codec->power_transition = 0;
+	}
 	codec->power_count++;
 	if (codec->power_on || codec->power_transition)
 		return;

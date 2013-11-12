@@ -394,6 +394,7 @@ static void hdmi_set_channel_count(struct hda_codec *codec,
  */
 static void init_channel_allocations(void)
 {
+	printk(KERN_INFO "ENTERING init_channel_allocations\n");
 	int i, j;
 	struct cea_channel_speaker_allocation *p;
 
@@ -699,18 +700,21 @@ static void hdmi_intrinsic_event(struct hda_codec *codec, unsigned int res)
 	int pin_nid = res >> AC_UNSOL_RES_TAG_SHIFT;
 	int pd = !!(res & AC_UNSOL_RES_PD);
 	int eldv = !!(res & AC_UNSOL_RES_ELDV);
-	int pin_idx;
+	int pin_idx=0;
 	struct hdmi_eld *eld;
 
 	printk(KERN_INFO
-		"HDMI hot plug event: Codec=%d Pin=%d Presence_Detect=%d ELD_Valid=%d\n",
-		codec->addr, pin_nid, pd, eldv);
+		"HDMI hot plug event: Codec=%d Pin=%d Presence_Detect=%d ELD_Valid=%d, res=%d\n",
+		codec->addr, pin_nid, pd, eldv, res);
 
 	pin_idx = pin_nid_to_pin_index(spec, pin_nid);
 	if (pin_idx < 0)
 		return;
 	eld = &spec->pins[pin_idx].sink_eld;
-
+	if (eld == NULL){
+		snd_printk(KERN_WARNING "hdmi_intrinsic_event: eld == NULL\n");
+		return;
+	}
 	hdmi_present_sense(codec, pin_nid, eld);
 
 	/*
@@ -750,6 +754,7 @@ static void hdmi_unsol_event(struct hda_codec *codec, unsigned int res)
 	struct hdmi_spec *spec = codec->spec;
 	int tag = res >> AC_UNSOL_RES_TAG_SHIFT;
 	int subtag = (res & AC_UNSOL_RES_SUBTAG) >> AC_UNSOL_RES_SUBTAG_SHIFT;
+	printk(KERN_INFO "Entering hdmi_unsol_event(), subtag=%d, res=%d\n", subtag, res);
 
 	if (pin_nid_to_pin_index(spec, tag) < 0) {
 		snd_printd(KERN_INFO "Unexpected HDMI event tag 0x%x\n", tag);
@@ -773,7 +778,7 @@ static void hdmi_unsol_event(struct hda_codec *codec, unsigned int res)
 static int hdmi_setup_stream(struct hda_codec *codec, hda_nid_t cvt_nid,
 			      hda_nid_t pin_nid, u32 stream_tag, int format)
 {
-	int pinctl;
+	int pinctl = 0;
 	int new_pinctl = 0;
 
 	if (snd_hda_query_pin_caps(codec, pin_nid) & AC_PINCAP_HBR) {
@@ -814,39 +819,71 @@ static int hdmi_pcm_open(struct hda_pcm_stream *hinfo,
 			 struct hda_codec *codec,
 			 struct snd_pcm_substream *substream)
 {
+	printk(KERN_INFO "Entering hdmi_pcm_open()\n");
 	struct hdmi_spec *spec = codec->spec;
 	struct snd_pcm_runtime *runtime = substream->runtime;
-	int pin_idx, cvt_idx, mux_idx = 0;
+	int pin_idx=0, cvt_idx=0, mux_idx = 0;
 	struct hdmi_spec_per_pin *per_pin;
 	struct hdmi_eld *eld;
 	struct hdmi_spec_per_cvt *per_cvt = NULL;
-	int pinctl;
+	int pinctl = 0;
 
 	/* Validate hinfo */
+	if(spec==NULL){
+		snd_printk(KERN_WARNING "spec == NULL\n");
+		return -ENODEV;
+	}
 	pin_idx = hinfo_to_pin_index(spec, hinfo);
+
+//===================================================
+//klocworks
+//#define MAX_HDMI_CVTS	= 4, MAX_HDMI_PINS	4
+//Klocwork : add for array range check
+if(pin_idx <0 || pin_idx >= MAX_HDMI_PINS)
+{
+	snd_printk(KERN_WARNING
+		   "hdmi_pcm_open: pin_idx out of bound. set to 0\n");
+	pin_idx = 0;
+}
+//===================================================
 	if (snd_BUG_ON(pin_idx < 0))
 		return -EINVAL;
 	per_pin = &spec->pins[pin_idx];
 	eld = &per_pin->sink_eld;
 
+	if(eld == NULL){
+		snd_printk(KERN_WARNING "eld == NULL\n");
+		return -ENODEV;
+	}
+
 #ifdef CONFIG_SND_HDA_PLATFORM_NVIDIA_TEGRA
 	if ((codec->preset->id == 0x10de0020) &&
 	    (!eld->monitor_present || !eld->lpcm_sad_ready)) {
 		if (!eld->monitor_present) {
+			printk(KERN_INFO "hdmi_pcm_open() !eld->monitor_present");
 			if (tegra_hdmi_setup_hda_presence() < 0) {
 				snd_printk(KERN_WARNING
 					   "HDMI: No HDMI device connected\n");
 				return -ENODEV;
 			}
 		}
-		if (!eld->lpcm_sad_ready)
+		if (!eld->lpcm_sad_ready){
+			printk(KERN_INFO "hdmi_pcm_open() !eld->lpcm_sad_ready");
 			return -ENODEV;
+		}
 	}
 #endif
 
 	/* Dynamically assign converter to stream */
 	for (cvt_idx = 0; cvt_idx < spec->num_cvts; cvt_idx++) {
 		per_cvt = &spec->cvts[cvt_idx];
+
+//===================================================
+//klocworks
+//per_cvt may be NULL. Need to check it
+		if (per_cvt == NULL)
+		      continue;
+//===================================================
 
 		/* Must not already be assigned */
 		if (per_cvt->assigned)
@@ -861,12 +898,21 @@ static int hdmi_pcm_open(struct hda_pcm_stream *hinfo,
 		break;
 	}
 	/* No free converters */
-	if (cvt_idx == spec->num_cvts)
+	if (cvt_idx == spec->num_cvts){
+		printk(KERN_INFO "hdmi_pcm_open() cvt_idx == spec->num_cvts");
 		return -ENODEV;
+	}
+
+	/* Fix klocwork issue */
+	if (per_cvt == NULL){
+		snd_printk(KERN_WARNING "hdmi_pcm_open: per_cvt == NULL\n");
+		return -ENODEV;
+	}
 
 	/* Claim converter */
 	per_cvt->assigned = 1;
 	hinfo->nid = per_cvt->cvt_nid;
+
 
 	snd_hda_codec_write(codec, per_pin->pin_nid, 0,
 			    AC_VERB_SET_CONNECT_SEL,
@@ -889,8 +935,10 @@ static int hdmi_pcm_open(struct hda_pcm_stream *hinfo,
 	if (!static_hdmi_pcm && (eld->eld_valid || eld->lpcm_sad_ready)) {
 		snd_hdmi_eld_update_pcm_info(eld, hinfo);
 		if (hinfo->channels_min > hinfo->channels_max ||
-		    !hinfo->rates || !hinfo->formats)
+		    !hinfo->rates || !hinfo->formats){
+			printk(KERN_INFO "(hinfo->channels_min > hinfo->channels_max || !hinfo->rates || !hinfo->formats)");
 			return -ENODEV;
+		}
 	}
 
 	/* Store the updated parameters */
@@ -901,6 +949,7 @@ static int hdmi_pcm_open(struct hda_pcm_stream *hinfo,
 
 	snd_pcm_hw_constraint_step(substream->runtime, 0,
 				   SNDRV_PCM_HW_PARAM_CHANNELS, 2);
+	printk(KERN_INFO "Leaving hdmi_pcm_open()");
 	return 0;
 }
 
@@ -939,7 +988,9 @@ static void hdmi_present_sense(struct hda_codec *codec, hda_nid_t pin_nid,
 	 * specification worked this way. Hence, we just ignore the data in
 	 * the unsolicited response to avoid custom WARs.
 	 */
+	printk(KERN_INFO "Entering hdmi_present_sense()");
 	int present = snd_hda_pin_sense(codec, pin_nid);
+	printk(KERN_INFO "hdmi_present_sense(): present = %d\n", present);
 	bool eld_valid = false;
 
 #ifdef CONFIG_PROC_FS
@@ -966,8 +1017,8 @@ static void hdmi_present_sense(struct hda_codec *codec, hda_nid_t pin_nid,
 static int hdmi_add_pin(struct hda_codec *codec, hda_nid_t pin_nid)
 {
 	struct hdmi_spec *spec = codec->spec;
-	unsigned int caps, config;
-	int pin_idx;
+	unsigned int caps = 0, config = 0;
+	int pin_idx = 0;
 	struct hdmi_spec_per_pin *per_pin;
 	struct hdmi_eld *eld;
 	int err;
@@ -1009,9 +1060,9 @@ static int hdmi_add_pin(struct hda_codec *codec, hda_nid_t pin_nid)
 static int hdmi_add_cvt(struct hda_codec *codec, hda_nid_t cvt_nid)
 {
 	struct hdmi_spec *spec = codec->spec;
-	int cvt_idx;
+	int cvt_idx = 0;
 	struct hdmi_spec_per_cvt *per_cvt;
-	unsigned int chans;
+	unsigned int chans = 0;
 	int err;
 
 	if (snd_BUG_ON(spec->num_cvts >= MAX_HDMI_CVTS))
@@ -1107,6 +1158,19 @@ static int generic_hdmi_playback_pcm_prepare(struct hda_pcm_stream *hinfo,
 	hda_nid_t cvt_nid = hinfo->nid;
 	struct hdmi_spec *spec = codec->spec;
 	int pin_idx = hinfo_to_pin_index(spec, hinfo);
+//===================================================
+//klocworks
+//struct hdmi_spec_per_pin pins[MAX_HDMI_PINS];
+//#define MAX_HDMI_CVTS	4
+//#define MAX_HDMI_PINS	4
+//Klocwork : add for array range check
+if(pin_idx <0 || pin_idx >= MAX_HDMI_PINS)
+{
+	snd_printk(KERN_WARNING
+		   "generic_hdmi_playback_pcm_prepare: pin_idx out of bound. set to 0\n");
+	pin_idx = 0;
+}
+//===================================================
 	hda_nid_t pin_nid = spec->pins[pin_idx].pin_nid;
 
 #if defined(CONFIG_SND_HDA_PLATFORM_NVIDIA_TEGRA) && defined(CONFIG_TEGRA_DC)
@@ -1142,10 +1206,10 @@ static int generic_hdmi_playback_pcm_cleanup(struct hda_pcm_stream *hinfo,
 					     struct snd_pcm_substream *substream)
 {
 	struct hdmi_spec *spec = codec->spec;
-	int cvt_idx, pin_idx;
+	int cvt_idx=0, pin_idx=0;
 	struct hdmi_spec_per_cvt *per_cvt;
 	struct hdmi_spec_per_pin *per_pin;
-	int pinctl;
+	int pinctl = 0;
 
 	snd_hda_codec_cleanup_stream(codec, hinfo->nid);
 
@@ -1153,6 +1217,22 @@ static int generic_hdmi_playback_pcm_cleanup(struct hda_pcm_stream *hinfo,
 		cvt_idx = cvt_nid_to_cvt_index(spec, hinfo->nid);
 		if (snd_BUG_ON(cvt_idx < 0))
 			return -EINVAL;
+
+//===================================================
+//klocworks
+//struct hdmi_spec_per_cvt cvts[MAX_HDMI_CVTS];
+//#define MAX_HDMI_CVTS	4
+//#define MAX_HDMI_PINS	4
+
+//Klocwork : add for array range check
+if(cvt_idx <0 || cvt_idx >= MAX_HDMI_CVTS)
+{
+	snd_printk(KERN_WARNING
+		   "generic_hdmi_playback_pcm_cleanup: cvt_idx out of bound. set to 0\n");
+	cvt_idx = 0;
+}
+//===================================================
+
 		per_cvt = &spec->cvts[cvt_idx];
 
 		snd_BUG_ON(!per_cvt->assigned);
@@ -1162,6 +1242,15 @@ static int generic_hdmi_playback_pcm_cleanup(struct hda_pcm_stream *hinfo,
 		pin_idx = hinfo_to_pin_index(spec, hinfo);
 		if (snd_BUG_ON(pin_idx < 0))
 			return -EINVAL;
+//===================================================
+//Klocwork : add for array range check
+if(pin_idx <0 || pin_idx >= MAX_HDMI_PINS)
+{
+	snd_printk(KERN_WARNING
+		   "generic_hdmi_playback_pcm_cleanup: pin_idx out of bound. set to 0\n");
+	pin_idx = 0;
+}
+//===================================================
 		per_pin = &spec->pins[pin_idx];
 
 		pinctl = snd_hda_codec_read(codec, per_pin->pin_nid, 0,
@@ -1227,6 +1316,7 @@ static int generic_hdmi_build_controls(struct hda_codec *codec)
 
 static int generic_hdmi_init(struct hda_codec *codec)
 {
+	printk(KERN_INFO "Entering generic_hdmi_init\n");
 	struct hdmi_spec *spec = codec->spec;
 	int pin_idx;
 
@@ -1279,6 +1369,7 @@ static const struct hda_codec_ops generic_hdmi_patch_ops = {
 
 static int patch_generic_hdmi(struct hda_codec *codec)
 {
+	printk(KERN_INFO "ENTERING patch_generic_hdmi\n");
 	struct hdmi_spec *spec;
 
 	spec = kzalloc(sizeof(*spec), GFP_KERNEL);
@@ -1555,6 +1646,17 @@ static int nvhdmi_8ch_7x_pcm_prepare(struct hda_pcm_stream *hinfo,
 
 	dataDCC1 = AC_DIG1_ENABLE | AC_DIG1_COPYRIGHT;
 	dataDCC2 = 0x2;
+
+//===================================================
+//klocworks
+//spdif may be NULL. Need to check it
+	if(spdif == NULL )
+	{
+		snd_printk(KERN_WARNING
+			"nvhdmi_8ch_7x_pcm_prepare: spdif is NULL. Return 0\n");
+		return 0;
+	}
+//===================================================
 
 	/* turn off SPDIF once; otherwise the IEC958 bits won't be updated */
 	if (codec->spdif_status_reset && (spdif->ctls & AC_DIG1_ENABLE))

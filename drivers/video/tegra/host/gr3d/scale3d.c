@@ -3,7 +3,7 @@
  *
  * Tegra Graphics Host 3D clock scaling
  *
- * Copyright (c) 2010-2012, NVIDIA Corporation.
+ * Copyright (c) 2010-2012, NVIDIA Corporation.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -37,16 +37,19 @@
 #include <linux/debugfs.h>
 #include <linux/types.h>
 #include <linux/clk.h>
-#include <linux/export.h>
 #include <mach/clk.h>
 #include <mach/hardware.h>
 #include "scale3d.h"
 #include "dev.h"
+#include <media/tegra_camera.h>
+#include <linux/seq_file.h>
 
 static int scale3d_is_enabled(void);
 static void scale3d_enable(int enable);
 
 #define POW2(x) ((x) * (x))
+#define CAMERA_3D_CLK 352000000
+#define CAMERA_3D_EMC_CLK 437000000
 
 /*
  * debugfs parameters to control 3d clock scaling test
@@ -62,6 +65,17 @@ static void scale3d_enable(int enable);
  * verbosity     - set above 5 for debug printouts
  */
 
+struct gpu_busy {
+	int freq;
+	ktime_t last_start;
+	unsigned long busy_time;
+	unsigned long total_time;
+};
+
+int FREQ_LEVEL = 0;
+static int curr_idx = 0;
+static struct gpu_busy gpu_loading[32];
+
 struct scale3d_info_rec {
 	struct mutex lock; /* lock for timestamps etc */
 	int enable;
@@ -70,6 +84,7 @@ struct scale3d_info_rec {
 	ktime_t fast_frame;
 	ktime_t last_idle;
 	ktime_t last_short_term_idle;
+	ktime_t last_busy;
 	int is_idle;
 	ktime_t last_tweak;
 	ktime_t last_down;
@@ -113,9 +128,37 @@ struct scale3d_info_rec {
 
 static struct scale3d_info_rec scale3d;
 
+static int loading_show(struct seq_file *s, void *unused)
+{
+	ktime_t t = ktime_get();
+	int i=0;
+
+	gpu_loading[curr_idx].total_time +=
+		ktime_us_delta(t, gpu_loading[curr_idx].last_start);
+
+	for (i=0;i<FREQ_LEVEL;i++)
+		seq_printf(s,"%d 0\n",gpu_loading[i].freq);
+
+	return 0;
+}
+
+static int loading_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, loading_show, inode->i_private);
+}
+
+static const struct file_operations loading_fops = {
+	.open		= loading_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+};
+
 static void scale3d_clocks(unsigned long percent)
 {
 	unsigned long hz, curr;
+	int i = 0;
+	ktime_t t;
 
 	if (!tegra_is_clk_enabled(scale3d.clk_3d))
 		return;
@@ -130,7 +173,11 @@ static void scale3d_clocks(unsigned long percent)
 	if (!(hz >= scale3d.max_rate_3d && curr == scale3d.max_rate_3d)) {
 		if (tegra_get_chipid() == TEGRA_CHIPID_TEGRA3)
 			clk_set_rate(scale3d.clk_3d2, 0);
-		clk_set_rate(scale3d.clk_3d, hz);
+
+		if (is_tegra_camera_on())
+			clk_set_rate(scale3d.clk_3d, CAMERA_3D_CLK);
+		else
+			clk_set_rate(scale3d.clk_3d, hz);
 
 		if (scale3d.p_scale_emc) {
 			long after = (long) clk_get_rate(scale3d.clk_3d);
@@ -140,8 +187,29 @@ static void scale3d_clocks(unsigned long percent)
 					(scale3d.emc_dip_slope *
 					POW2(after / 1000 - scale3d.emc_xmid) +
 					scale3d.emc_dip_offset);
-			clk_set_rate(scale3d.clk_3d_emc, hz);
+			if (is_tegra_camera_on())
+				clk_set_rate(scale3d.clk_3d_emc, CAMERA_3D_EMC_CLK);
+			else
+				clk_set_rate(scale3d.clk_3d_emc, hz);
 		}
+	}
+	t = ktime_get();
+
+	hz = clk_get_rate(scale3d.clk_3d);
+
+	if (hz != curr)
+	{
+		gpu_loading[curr_idx].total_time +=
+			ktime_us_delta(t, gpu_loading[curr_idx].last_start);
+
+		for (i=0 ; i<FREQ_LEVEL ; i++) {
+			if (gpu_loading[i].freq == hz) {
+				curr_idx = i;
+				break;
+			}
+		}
+
+		gpu_loading[curr_idx].last_start = t;
 	}
 }
 
@@ -169,13 +237,45 @@ void nvhost_scale3d_suspend(struct nvhost_device *dev)
 /* set 3d clocks to max */
 static void reset_3d_clocks(void)
 {
+	unsigned long curr = clk_get_rate(scale3d.clk_3d);
+	unsigned long hz = 0;
+	int i = 0;
+	ktime_t t;
+
 	if (clk_get_rate(scale3d.clk_3d) != scale3d.max_rate_3d) {
-		clk_set_rate(scale3d.clk_3d, scale3d.max_rate_3d);
-		if (tegra_get_chipid() == TEGRA_CHIPID_TEGRA3)
-			clk_set_rate(scale3d.clk_3d2, scale3d.max_rate_3d);
-		if (scale3d.p_scale_emc)
-			clk_set_rate(scale3d.clk_3d_emc,
-				clk_round_rate(scale3d.clk_3d_emc, UINT_MAX));
+		if (is_tegra_camera_on())
+			clk_set_rate(scale3d.clk_3d, CAMERA_3D_CLK);
+		else
+			clk_set_rate(scale3d.clk_3d, scale3d.max_rate_3d);
+		if (tegra_get_chipid() == TEGRA_CHIPID_TEGRA3) {
+			if (is_tegra_camera_on())
+				clk_set_rate(scale3d.clk_3d2, CAMERA_3D_CLK);
+			else
+				clk_set_rate(scale3d.clk_3d2, scale3d.max_rate_3d);
+		}
+		if (scale3d.p_scale_emc) {
+			if(is_tegra_camera_on())
+				clk_set_rate(scale3d.clk_3d_emc, CAMERA_3D_EMC_CLK);
+			else
+				clk_set_rate(scale3d.clk_3d_emc,
+					clk_round_rate(scale3d.clk_3d_emc, UINT_MAX));
+		}
+	}
+	t = ktime_get();
+
+	hz = clk_get_rate(scale3d.clk_3d);
+	if (hz != curr)
+	{
+		gpu_loading[curr_idx].total_time +=
+			ktime_us_delta(t, gpu_loading[curr_idx].last_start);
+
+		for (i=0 ; i<FREQ_LEVEL ; i++) {
+			if (gpu_loading[i].freq == hz) {
+				curr_idx = i;
+				break;
+			}
+		}
+		gpu_loading[curr_idx].last_start = t;
 	}
 }
 
@@ -404,8 +504,11 @@ void nvhost_scale3d_notify_idle(struct nvhost_device *dev)
 		scale3d.idle_total += dt;
 		dt = ktime_us_delta(t, scale3d.last_short_term_idle);
 		scale3d.idle_short_term_total += dt;
-	} else
+	} else {
 		scale3d.is_idle = 1;
+		gpu_loading[curr_idx].busy_time +=
+			ktime_us_delta(t, scale3d.last_busy);
+	}
 
 	scale3d.last_idle = t;
 	scale3d.last_short_term_idle = t;
@@ -450,8 +553,12 @@ void nvhost_scale3d_notify_busy(struct nvhost_device *dev)
 			ktime_us_delta(t, scale3d.last_short_term_idle);
 		scale3d.idle_short_term_total += short_term_idle;
 		scale3d.is_idle = 0;
+	} else {
+		gpu_loading[curr_idx].busy_time +=
+			ktime_us_delta(t, scale3d.last_busy);
 	}
 
+	scale3d.last_busy = t;
 	scaling_state_check(t);
 
 	mutex_unlock(&scale3d.lock);
@@ -481,7 +588,11 @@ static void do_scale(int diff)
 
 	if (tegra_get_chipid() == TEGRA_CHIPID_TEGRA3)
 		clk_set_rate(scale3d.clk_3d2, 0);
-	clk_set_rate(scale3d.clk_3d, hz);
+
+	if (is_tegra_camera_on())
+		clk_set_rate(scale3d.clk_3d, CAMERA_3D_CLK);
+	else
+		clk_set_rate(scale3d.clk_3d, hz);
 
 	if (scale3d.p_scale_emc) {
 		long after = (long) clk_get_rate(scale3d.clk_3d);
@@ -491,7 +602,10 @@ static void do_scale(int diff)
 				(scale3d.emc_dip_slope *
 				POW2(after / 1000 - scale3d.emc_xmid) +
 				scale3d.emc_dip_offset);
-		clk_set_rate(scale3d.clk_3d_emc, hz);
+		if (is_tegra_camera_on())
+			clk_set_rate(scale3d.clk_3d_emc, CAMERA_3D_EMC_CLK);
+		else
+			clk_set_rate(scale3d.clk_3d_emc, hz);
 	}
 }
 
@@ -588,6 +702,7 @@ void nvhost_scale3d_debug_init(struct dentry *de)
 	CREATE_SCALE3D_FILE(scale_step);
 	CREATE_SCALE3D_FILE(verbosity);
 #undef CREATE_SCALE3D_FILE
+	f = debugfs_create_file("gpubusy_time", S_IRUGO, d , NULL, &loading_fops);
 }
 
 static ssize_t enable_3d_scaling_show(struct device *device,
@@ -738,7 +853,22 @@ void nvhost_scale3d_init(struct nvhost_device *d)
 
 		scale3d.init = 1;
 	}
+	int i=0;
+	struct clk *c = scale3d.clk_3d;
+	long rate = 0;
 
+        /* shared bus clock must round up, unless top of range reached */
+        while (rate <= scale3d.max_rate_3d) {
+                long rounded_rate =clk_round_rate(c, rate);
+                if (IS_ERR_VALUE(rounded_rate) || (rounded_rate <= rate))
+                        break;
+
+                rate = rounded_rate + 2000;     /* 2kHz resolution */
+		gpu_loading[i].freq = rounded_rate;
+		i++;
+        }
+	FREQ_LEVEL = i;
+	curr_idx = 0;
 	nvhost_scale3d_reset();
 }
 

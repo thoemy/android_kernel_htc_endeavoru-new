@@ -1,5 +1,5 @@
 /*
- * tps6238x0-regulator.c -- TI tps623850/tps623860/tps623870
+ * tps6238x0.c -- TI tps623850/tps623860/tps623870
  *
  * Driver for processor core supply tps623850, tps623860 and tps623870
  *
@@ -29,7 +29,7 @@
 #include <linux/platform_device.h>
 #include <linux/regulator/driver.h>
 #include <linux/regulator/machine.h>
-#include <linux/regulator/tps6238x0-regulator.h>
+#include <linux/regulator/tps6238x0.h>
 #include <linux/gpio.h>
 #include <linux/i2c.h>
 #include <linux/delay.h>
@@ -223,22 +223,12 @@ static int tps6238x0_enable(struct regulator_dev *rdev)
 {
 	struct tps6238x0_chip *tps = rdev_get_drvdata(rdev);
 	int ret;
-	int i;
 
-	/* Enable required VSET configuration */
-	for (i = 0; i < TPS6238X0_MAX_VSET; ++i) {
-		unsigned int en = 0;
-		if (tps->valid_gpios || (i == tps->curr_vset_id))
-			en = BIT(7);
-
-		ret = regmap_update_bits(tps->regmap, REG_VSET0 + i,
-				BIT(7), en);
-		if (ret < 0) {
-			dev_err(tps->dev, "%s() fails in updating reg %d\n",
-					__func__, REG_VSET0 + i);
-			return ret;
-		}
-	}
+	ret = regmap_update_bits(tps->regmap, REG_VSET0 + tps->curr_vset_id,
+				BIT(7), BIT(7));
+	if (ret < 0)
+		dev_err(tps->dev, "%s: Error in updating bit of register %d\n",
+			__func__, REG_VSET0 + tps->curr_vset_id);
 	return ret;
 }
 
@@ -246,18 +236,12 @@ static int tps6238x0_disable(struct regulator_dev *rdev)
 {
 	struct tps6238x0_chip *tps = rdev_get_drvdata(rdev);
 	int ret;
-	int i;
 
-	/* Disable required VSET configuration */
-	for (i = 0; i < TPS6238X0_MAX_VSET; ++i) {
-		ret = regmap_update_bits(tps->regmap, REG_VSET0 + i,
+	ret = regmap_update_bits(tps->regmap, REG_VSET0 + tps->curr_vset_id,
 				BIT(7), 0);
-		if (ret < 0) {
-			dev_err(tps->dev, "%s() fails in updating reg %d\n",
-					__func__, REG_VSET0 + i);
-			return ret;
-		}
-	}
+	if (ret < 0)
+		dev_err(tps->dev, "%s: Error in updating bit of register %d\n",
+			__func__, REG_VSET0 + tps->curr_vset_id);
 	return ret;
 }
 
@@ -272,7 +256,7 @@ static struct regulator_ops tps6238x0_ops = {
 	.list_voltage		= tps6238x0_list_voltage,
 };
 
-static int __devinit tps6238x0_configure(struct tps6238x0_chip *tps,
+static int tps6238x0_configure(struct tps6238x0_chip *tps,
 		struct tps6238x0_regulator_platform_data *pdata)
 {
 	int ret;
@@ -289,17 +273,25 @@ static int __devinit tps6238x0_configure(struct tps6238x0_chip *tps,
 		return ret;
 	}
 
-	/* Enable required VSET configuration */
-	for (i = 0; i < TPS6238X0_MAX_VSET; ++i) {
-		unsigned int en = 0;
-		if (tps->valid_gpios || (i == tps->curr_vset_id))
-			en = BIT(7);
-
-		ret = regmap_update_bits(tps->regmap, REG_VSET0 + i,
-				BIT(7), en);
-		if (ret < 0) {
-			dev_err(tps->dev, "%s() fails in updating reg %d\n",
+	/* Enable all VSET configuration */
+	if (tps->valid_gpios) {
+		for (i = 0; i < TPS6238X0_MAX_VSET; ++i) {
+			ret = regmap_update_bits(tps->regmap, REG_VSET0 + i,
+						BIT(7), BIT(7));
+			if (ret < 0) {
+				dev_err(tps->dev,
+					"%s() fails in updating reg %d\n",
 					__func__, REG_VSET0 + i);
+				return ret;
+			}
+		}
+	} else {
+		ret = regmap_update_bits(tps->regmap,
+				REG_VSET0 + tps->curr_vset_id, BIT(7), BIT(7));
+		if (ret < 0) {
+			dev_err(tps->dev,
+				"%s() fails in updating reg %d\n",
+				__func__, REG_VSET0 + tps->curr_vset_id);
 			return ret;
 		}
 	}
@@ -316,9 +308,6 @@ static int __devinit tps6238x0_configure(struct tps6238x0_chip *tps,
 static const struct regmap_config tps6238x0_regmap_config = {
 	.reg_bits = 8,
 	.val_bits = 8,
-	.max_register = REG_CHIPID,
-	.num_reg_defaults_raw = REG_CHIPID + 1,
-	.cache_type = REGCACHE_RBTREE,
 };
 
 static int __devinit tps6238x0_probe(struct i2c_client *client,
@@ -355,7 +344,7 @@ static int __devinit tps6238x0_probe(struct i2c_client *client,
 	tps->desc.ops = &tps6238x0_ops;
 	tps->desc.type = REGULATOR_VOLTAGE;
 	tps->desc.owner = THIS_MODULE;
-	tps->regmap = devm_regmap_init_i2c(client, &tps6238x0_regmap_config);
+	tps->regmap = regmap_init_i2c(client, &tps6238x0_regmap_config);
 	if (IS_ERR(tps->regmap)) {
 		ret = PTR_ERR(tps->regmap);
 		dev_err(&client->dev, "%s() Err: Failed to allocate register"
@@ -401,7 +390,7 @@ static int __devinit tps6238x0_probe(struct i2c_client *client,
 
 	/* Register the regulators */
 	rdev = regulator_register(&tps->desc, &client->dev,
-				pdata->init_data, tps);
+				&pdata->reg_init_data, tps);
 	if (IS_ERR(rdev)) {
 		dev_err(tps->dev, "%s() Err: Failed to register %s\n",
 				__func__, id->name);
@@ -410,6 +399,9 @@ static int __devinit tps6238x0_probe(struct i2c_client *client,
 	}
 
 	tps->rdev = rdev;
+
+	dev_info(&client->dev, "%s(): Probe done!", __func__);
+
 	return 0;
 
 err_init:
@@ -452,7 +444,7 @@ static void tps6238x0_shutdown(struct i2c_client *client)
 }
 
 static const struct i2c_device_id tps6238x0_id[] = {
-	{.name = "tps623850", },
+	{.name = "tps6238x0", },
 	{.name = "tps623860", },
 	{.name = "tps623870", },
 	{},
@@ -484,5 +476,5 @@ static void __exit tps6238x0_cleanup(void)
 module_exit(tps6238x0_cleanup);
 
 MODULE_AUTHOR("Laxman Dewangan <ldewangan@nvidia.com>");
-MODULE_DESCRIPTION("TPS623850/TPS623860/TPS623870 voltage regulator driver");
+MODULE_DESCRIPTION("TPS623850/TPS623860/TPS623870/ voltage regulator driver");
 MODULE_LICENSE("GPL v2");

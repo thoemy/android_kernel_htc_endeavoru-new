@@ -35,6 +35,7 @@
 #include <linux/spinlock.h>
 #include <linux/uaccess.h>
 #include <linux/watchdog.h>
+#include <mach/board_htc.h>
 #ifdef CONFIG_TEGRA_FIQ_DEBUGGER
 #include <mach/irqs.h>
 #endif
@@ -196,6 +197,7 @@ static irqreturn_t tegra_wdt_interrupt(int irq, void *dev_id)
 {
 	unsigned i, status;
 
+	pr_info("touch watchdog\n");
 	for (i = 0; i < MAX_NR_CPU_WDT; i++) {
 		if (tegra_wdt[i] == NULL)
 			continue;
@@ -571,12 +573,25 @@ static struct platform_driver tegra_wdt_driver = {
 
 static int __init tegra_wdt_init(void)
 {
-	return platform_driver_register(&tegra_wdt_driver);
+	/*
+	 * Use kernel_flag KERNEL_FLAG_WATCHDOG_ENABLE bit
+	 * to decide to register tegra_wdt driver or not.
+	 * 0 : Enable tegra watchdog.
+	 * 1 : Disable tegra watchdog.
+	 */
+	if (get_kernel_flag() & KERNEL_FLAG_WATCHDOG_ENABLE) {
+		pr_info("Driver %s is not registered\n", tegra_wdt_driver.driver.name);
+		return 0;
+	} else {
+		pr_info("Driver %s is registered\n", tegra_wdt_driver.driver.name);
+		return platform_driver_register(&tegra_wdt_driver);
+	}
 }
 
 static void __exit tegra_wdt_exit(void)
 {
-	platform_driver_unregister(&tegra_wdt_driver);
+	if (!(get_kernel_flag() & KERNEL_FLAG_WATCHDOG_ENABLE))
+		platform_driver_unregister(&tegra_wdt_driver);
 }
 
 module_init(tegra_wdt_init);

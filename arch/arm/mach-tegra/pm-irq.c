@@ -61,6 +61,8 @@ module_param(debug_lp0, bool, S_IRUGO | S_IWUSR);
 static bool warn_prevent_lp0;
 module_param(warn_prevent_lp0, bool, S_IRUGO | S_IWUSR);
 
+int global_wakeup_state;
+
 bool tegra_pm_irq_lp0_allowed(void)
 {
 	return (tegra_prevent_lp0 == 0);
@@ -214,20 +216,23 @@ static void tegra_pm_irq_syscore_resume_helper(
 	for_each_set_bit(wake, &wake_status, sizeof(wake_status) * 8) {
 		irq = tegra_wake_to_irq(wake + 32 * index);
 		if (!irq) {
-			pr_info("Resume caused by WAKE%d\n",
+			pr_info("[WAKEUP] Resume caused by WAKE%d\n",
 				(wake + 32 * index));
 			continue;
 		}
 
 		desc = irq_to_desc(irq);
 		if (!desc || !desc->action || !desc->action->name) {
-			pr_info("Resume caused by WAKE%d, irq %d\n",
+			pr_info("[WAKEUP] Resume caused by WAKE%d, irq %d\n",
 				(wake + 32 * index), irq);
 			continue;
 		}
 
-		pr_info("Resume caused by WAKE%d, %s\n", (wake + 32 * index),
+		pr_info("[WAKEUP] Resume caused by WAKE%d, %s\n", (wake + 32 * index),
 			desc->action->name);
+		global_wakeup_state = (wake + 32 * index);
+		pr_info("global_wakeup_state is %d, wake_status is %ld\n",
+				global_wakeup_state, wake_status);
 
 		tegra_wake_irq_count[wake + 32 * index]++;
 

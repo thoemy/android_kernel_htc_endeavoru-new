@@ -33,6 +33,7 @@
 #include "clock.h"
 #include "cpu-tegra.h"
 #include "dvfs.h"
+#include <mach/board_htc.h>
 
 static struct tegra_thermal_data *therm;
 static LIST_HEAD(tegra_therm_list);
@@ -208,6 +209,8 @@ static void tegra_thermal_alert_unlocked(void *data)
 	long lo_limit_edp_tj = 0, hi_limit_edp_tj = 0;
 	long temp_low_dev, temp_low_tj;
 	int lo_limit_tj = 0, hi_limit_tj = 0;
+	int throttle_temp;
+	int last_throttle_temp;
 #ifdef CONFIG_TEGRA_EDP_LIMITS
 	const struct tegra_edp_limits *z;
 	int zones_sz;
@@ -281,9 +284,9 @@ static void tegra_thermal_alert_unlocked(void *data)
 #ifdef CONFIG_TEGRA_EDP_LIMITS
 	/* inform edp governor */
 	if (edp_thermal_zone_val != temp_tj) {
-		long temp_edp = (dev2tj(device, temp_tj) - therm->edp_offset) / 1000;
+		long temp_edp = (temp_tj - therm->edp_offset) / 1000;
 		tegra_edp_update_thermal_zone(temp_edp);
-		edp_thermal_zone_val = temp_edp;
+		edp_thermal_zone_val = temp_tj;
 	}
 #endif
 }
@@ -390,7 +393,6 @@ int tegra_thermal_device_register(struct tegra_thermal_device *device)
 		create_thz = true;
 	}
 #endif
-
 #ifdef CONFIG_TEGRA_THERMAL_THROTTLE
 	if (create_thz) {
 		thz = thermal_zone_device_register(
@@ -441,7 +443,6 @@ int tegra_thermal_device_register(struct tegra_thermal_device *device)
 		tegra_skin_device_register(device);
 #endif
 
-	register_pm_notifier(&tegra_thermal_nb);
 	return 0;
 }
 
@@ -476,6 +477,8 @@ int __init tegra_thermal_init(struct tegra_thermal_data *data,
 
 	throttle_list = tlist;
 	throttle_list_size = tlist_size;
+
+	register_pm_notifier(&tegra_thermal_nb);
 
 	return 0;
 }

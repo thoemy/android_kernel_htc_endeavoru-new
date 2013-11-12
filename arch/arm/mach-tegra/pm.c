@@ -59,7 +59,7 @@
 #include <mach/iomap.h>
 #include <mach/irqs.h>
 #include <mach/powergate.h>
-
+#include <mach/mfootprint.h>
 #include "board.h"
 #include "clock.h"
 #include "cpuidle.h"
@@ -135,6 +135,7 @@ struct suspend_context tegra_sctx;
 
 #define PMC_WAKE_STATUS		0x14
 #define PMC_SW_WAKE_STATUS	0x18
+#define PMC_WAKE2_STATUS	0x168
 #define PMC_COREPWRGOOD_TIMER	0x3c
 #define PMC_CPUPWRGOOD_TIMER	0xc8
 #define PMC_CPUPWROFF_TIMER	0xcc
@@ -178,8 +179,18 @@ struct suspend_context tegra_sctx;
 #define MC_SECURITY_SIZE	0x70
 #define MC_SECURITY_CFG2	0x7c
 
-#define AWAKE_CPU_FREQ_MIN	100000
+#define AWAKE_CPU_FREQ_MIN	51000
 static struct pm_qos_request_list awake_cpu_freq_req;
+
+/*
+ * SCLK_ADJUST_DELAY is timeout to delay lowering SCLK
+ * after display off/suspend. SCLK is kept at 40Mhz for the specified
+ * timeout period. This is done to solve audio glitch as it was
+ * found that dropping SCLK at 12Mhz doesn't provive enough bandwidth.
+ */
+#define SCLK_ADJUST_DELAY 20000
+static struct	delayed_work delayed_adjust;
+DEFINE_MUTEX(early_suspend_lock);
 
 struct dvfs_rail *tegra_cpu_rail;
 static struct dvfs_rail *tegra_core_rail;
@@ -824,7 +835,7 @@ static int tegra_suspend_enter(suspend_state_t state)
 
 	ret = tegra_suspend_dram(current_suspend_mode, 0);
 	if (ret) {
-		pr_info("Aborting suspend, tegra_suspend_dram error=%d\n", ret);
+		pr_info("[R] Aborting suspend, tegra_suspend_dram error=%d\n", ret);
 		goto abort_suspend;
 	}
 
@@ -872,6 +883,9 @@ static void tegra_suspend_check_pwr_stats(void)
 
 	return;
 }
+
+unsigned long long wake_reason_resume;
+EXPORT_SYMBOL(wake_reason_resume);
 
 int tegra_suspend_dram(enum tegra_suspend_mode mode, unsigned int flags)
 {
@@ -939,6 +953,9 @@ int tegra_suspend_dram(enum tegra_suspend_mode mode, unsigned int flags)
 	outer_flush_all();
 	outer_disable();
 
+	/* SSD_RIL: Workaround for resume HSIC Strobe glitch. */
+	writel(0x800, pmc + 0x0e0);
+
 	if (mode == TEGRA_SUSPEND_LP2)
 		tegra_sleep_cpu(PLAT_PHYS_OFFSET - PAGE_OFFSET);
 	else
@@ -983,6 +1000,9 @@ int tegra_suspend_dram(enum tegra_suspend_mode mode, unsigned int flags)
 
 	tegra_common_resume();
 
+	wake_reason_resume = __raw_readl(pmc + PMC_WAKE_STATUS);
+	wake_reason_resume |= ((u64)readl(pmc + PMC_WAKE2_STATUS)) << 32;
+
 fail:
 	return err;
 }
@@ -1002,12 +1022,22 @@ static int tegra_suspend_prepare(void)
 
 static void tegra_suspend_finish(void)
 {
+	if((pdata->boost_resume_reason & (u32)wake_reason_resume) !=
+		wake_reason_resume) {
+		goto noboost;
+	}
+
 	if (pdata && pdata->cpu_resume_boost) {
 		int ret = tegra_suspended_target(pdata->cpu_resume_boost);
 		pr_info("Tegra: resume CPU boost to %u KHz: %s (%d)\n",
 			pdata->cpu_resume_boost, ret ? "Failed" : "OK", ret);
 	}
 
+noboost:
+	wake_reason_resume = 0;
+	pr_info("wake reason is 0x%x\n", (u32)wake_reason_resume);
+	pr_info("board boost wake reason is 0x%x\n",
+			(u32)pdata->boost_resume_reason);
 	if ((current_suspend_mode == TEGRA_SUSPEND_LP0) && tegra_deep_sleep)
 		tegra_deep_sleep(0);
 }
@@ -1074,7 +1104,7 @@ static struct kobject *suspend_kobj;
 
 static int tegra_pm_enter_suspend(void)
 {
-	pr_info("Entering suspend state %s\n", lp_state[current_suspend_mode]);
+	pr_info("[R] Entering suspend state %s\n", lp_state[current_suspend_mode]);
 	if (current_suspend_mode == TEGRA_SUSPEND_LP0)
 		tegra_lp0_cpu_mode(true);
 	return 0;
@@ -1084,7 +1114,7 @@ static void tegra_pm_enter_resume(void)
 {
 	if (current_suspend_mode == TEGRA_SUSPEND_LP0)
 		tegra_lp0_cpu_mode(false);
-	pr_info("Exited suspend state %s\n", lp_state[current_suspend_mode]);
+	pr_info("[R] Exited suspend state %s\n", lp_state[current_suspend_mode]);
 }
 
 static struct syscore_ops tegra_pm_enter_syscore_ops = {
@@ -1357,18 +1387,37 @@ arch_initcall(tegra_debug_uart_syscore_init);
 
 #ifdef CONFIG_HAS_EARLYSUSPEND
 static struct clk *clk_wake;
-static void pm_early_suspend(struct early_suspend *h)
+static void delayed_adjusting_work(struct work_struct *work)
 {
+	mutex_lock(&early_suspend_lock);
 	if (clk_wake)
 		clk_disable(clk_wake);
+	mutex_unlock(&early_suspend_lock);
+}
+
+static void pm_early_suspend(struct early_suspend *h)
+{
+	MF_DEBUG("00230000");
+	mutex_lock(&early_suspend_lock);
+	MF_DEBUG("00230001");
+	schedule_delayed_work(&delayed_adjust, msecs_to_jiffies(SCLK_ADJUST_DELAY));
+	MF_DEBUG("00230002");
 	pm_qos_update_request(&awake_cpu_freq_req, PM_QOS_DEFAULT_VALUE);
+	MF_DEBUG("00230003");
+	mutex_unlock(&early_suspend_lock);
+	MF_DEBUG("00230004");
 }
 
 static void pm_late_resume(struct early_suspend *h)
 {
+	mutex_lock(&early_suspend_lock);
+	if (clk_wake && (clk_wake->refcnt >= 1))
+		clk_disable(clk_wake);
+	cancel_delayed_work(&delayed_adjust);
 	if (clk_wake)
 		clk_enable(clk_wake);
 	pm_qos_update_request(&awake_cpu_freq_req, (s32)AWAKE_CPU_FREQ_MIN);
+	mutex_unlock(&early_suspend_lock);
 }
 
 static struct early_suspend pm_early_suspender = {
@@ -1380,6 +1429,7 @@ static int pm_init_wake_behavior(void)
 {
 	clk_wake = tegra_get_clock_by_name("wake.sclk");
 	register_early_suspend(&pm_early_suspender);
+	INIT_DELAYED_WORK(&delayed_adjust, delayed_adjusting_work);
 	return 0;
 }
 

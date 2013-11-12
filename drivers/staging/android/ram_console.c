@@ -22,6 +22,7 @@
 #include <linux/uaccess.h>
 #include <linux/io.h>
 #include <linux/platform_data/ram_console.h>
+#include <mach/mfootprint.h>
 
 #ifdef CONFIG_ANDROID_RAM_CONSOLE_ERROR_CORRECTION
 #include <linux/rslib.h>
@@ -211,6 +212,14 @@ ram_console_save_old(struct ram_console_buffer *buffer, const char *bootinfo,
 		bootinfo_size = strlen(bootinfo) + strlen(bootinfo_label);
 	total_size += bootinfo_size;
 
+#if defined(CONFIG_MEMORY_FOOTPRINT_DEBUGGING)
+	if (old_mf != NULL) {
+		total_size += HEADER_LENGTH;
+		total_size += FOOTPRINT_LENGTH;
+	} else
+		pr_info("[MF] There is no last memory footprint\n");
+#endif
+
 	if (dest == NULL) {
 		dest = kmalloc(total_size, GFP_KERNEL);
 		if (dest == NULL) {
@@ -234,9 +243,20 @@ ram_console_save_old(struct ram_console_buffer *buffer, const char *bootinfo,
 	if (bootinfo) {
 		memcpy(ptr, bootinfo_label, strlen(bootinfo_label));
 		ptr += strlen(bootinfo_label);
-		memcpy(ptr, bootinfo, bootinfo_size);
-		ptr += bootinfo_size;
+		memcpy(ptr, bootinfo, strlen(bootinfo));
+		ptr += strlen(bootinfo);
 	}
+
+#if defined(CONFIG_MEMORY_FOOTPRINT_DEBUGGING)
+	if (old_mf != NULL) {
+		memcpy(ptr, old_mf, (HEADER_LENGTH+FOOTPRINT_LENGTH));
+		ptr += HEADER_LENGTH;
+		ptr += FOOTPRINT_LENGTH;
+		kfree(old_mf);
+		old_mf = NULL;
+	}
+#endif
+
 }
 
 static int __init ram_console_init(struct ram_console_buffer *buffer,

@@ -23,6 +23,7 @@
 #include "dc_config.h"
 #include "dc_priv.h"
 
+atomic_t update_frame = ATOMIC_INIT(0);
 static int no_vsync;
 
 module_param_named(no_vsync, no_vsync, int, S_IRUGO | S_IWUSR);
@@ -261,7 +262,7 @@ int tegra_dc_update_windows(struct tegra_dc_win *windows[], int n)
 			update_mask |= WIN_A_ACT_REQ << win->idx;
 
 		if (!WIN_IS_ENABLED(win)) {
-			dc->windows[i].dirty = 1;
+			/*dc->windows[i].dirty = 1;  NV patch, but Now we do not use it */
 			tegra_dc_writel(dc, 0, DC_WIN_WIN_OPTIONS);
 			continue;
 		}
@@ -410,9 +411,11 @@ int tegra_dc_update_windows(struct tegra_dc_win *windows[], int n)
 			FRAME_END_INT | V_BLANK_INT | ALL_UF_INT);
 	}
 
-	if (dc->out->flags & TEGRA_DC_OUT_ONE_SHOT_MODE)
+	if (dc->out->flags & TEGRA_DC_OUT_ONE_SHOT_MODE) {
+		atomic_set(&update_frame,1);
 		schedule_delayed_work(&dc->one_shot_work,
 				msecs_to_jiffies(dc->one_shot_delay_ms));
+	}
 
 	/* update EMC clock if calculated bandwidth has changed */
 	tegra_dc_program_bandwidth(dc, false);
@@ -427,6 +430,35 @@ int tegra_dc_update_windows(struct tegra_dc_win *windows[], int n)
 	mutex_unlock(&dc->lock);
 	if (dc->out->flags & TEGRA_DC_OUT_ONE_SHOT_MODE)
 		mutex_unlock(&dc->one_shot_lock);
+
+	bool is_yuvp = 0;
+	for (i = 0; i < n; i++) {
+		struct tegra_dc_win *win = windows[i];
+		bool yuvp = tegra_dc_is_yuv_planar(win->fmt);
+		is_yuvp |= yuvp;
+	}
+
+	if (dc->ndev->id == 0) {
+		struct tegra_dc_out *out = dc->out;
+		struct tegra_dsi_out *dsi = out->dsi;
+		struct tegra_dsi_cmd *cur = NULL;
+		int n = dsi->n_cabc_cmd;
+		if (out && dsi && dc->out_ops && dc->out_ops->send_cmd) {
+			if (is_yuvp && !dc->isyuv_lasttime) {
+				printk(KERN_INFO "[DISP] YUV\r\n");
+				cur = dsi->dsi_cabc_still_mode;
+				dc->isyuv_lasttime = is_yuvp;
+			}
+			else if (!is_yuvp && dc->isyuv_lasttime) {
+				printk(KERN_INFO "[DISP] RGB\r\n");
+				cur = dsi->dsi_cabc_moving_mode;
+				dc->isyuv_lasttime = is_yuvp;
+			}
+			if (cur) {
+				dc->out_ops->send_cmd(dc, cur, n);
+			}
+		}
+	}
 
 	return 0;
 }
@@ -463,4 +495,3 @@ void tegra_dc_trigger_windows(struct tegra_dc *dc)
 	if (completed)
 		wake_up(&dc->wq);
 }
-

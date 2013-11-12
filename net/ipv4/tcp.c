@@ -1798,9 +1798,20 @@ recv_urg:
 }
 EXPORT_SYMBOL(tcp_recvmsg);
 
+#ifdef CONFIG_HTC_TCP_SYN_FAIL
+EXPORT_SYMBOL(sysctl_tcp_syn_fail);
+__be32 sysctl_tcp_syn_fail=0;
+#endif /* CONFIG_HTC_TCP_SYN_FAIL */
+
 void tcp_set_state(struct sock *sk, int state)
 {
 	int oldstate = sk->sk_state;
+
+#ifdef CONFIG_HTC_TCP_SYN_FAIL
+    struct inet_sock *inet;
+    struct inet_connection_sock *icsk = inet_csk(sk);
+    __be32 dst = icsk->icsk_inet.inet_daddr;
+#endif /* CONFIG_HTC_TCP_SYN_FAIL */
 
 	switch (state) {
 	case TCP_ESTABLISHED:
@@ -1816,6 +1827,19 @@ void tcp_set_state(struct sock *sk, int state)
 		if (inet_csk(sk)->icsk_bind_hash &&
 		    !(sk->sk_userlocks & SOCK_BINDPORT_LOCK))
 			inet_put_port(sk);
+
+#ifdef CONFIG_HTC_TCP_SYN_FAIL
+        	if (sk!=NULL) {
+	            inet = inet_sk(sk);
+        	    if (inet !=NULL && ntohs(inet->inet_sport) != 0 ) {
+        	        if ( dst != 0x0100007F && sk->sk_state== TCP_SYN_SENT && icsk->icsk_retransmits >= 2 ) {
+        	            printk(KERN_INFO "[NET][SMD] TCP SYN SENT fail, dst=%x, retransmit=%d \n",dst,icsk->icsk_retransmits);
+        	            sysctl_tcp_syn_fail = dst;
+        	        }
+        	    }
+        	}
+#endif /* CONFIG_HTC_TCP_SYN_FAIL */
+
 		/* fall through */
 	default:
 		if (oldstate == TCP_ESTABLISHED)
@@ -1917,7 +1941,9 @@ void tcp_close(struct sock *sk, long timeout)
 		u32 len = TCP_SKB_CB(skb)->end_seq - TCP_SKB_CB(skb)->seq -
 			  tcp_hdr(skb)->fin;
 		data_was_unread += len;
-		__kfree_skb(skb);
+
+		if ((skb) && (!IS_ERR(skb)))
+		  __kfree_skb(skb);
 	}
 
 	sk_mem_reclaim(sk);

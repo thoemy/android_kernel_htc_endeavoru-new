@@ -195,6 +195,8 @@ struct hci_dev {
 
 	__u16			init_last_cmd;
 
+	struct crypto_blkcipher	*tfm;
+
 	struct inquiry_cache	inq_cache;
 	struct hci_conn_hash	conn_hash;
 	struct list_head	blacklist;
@@ -390,22 +392,6 @@ static inline void hci_conn_hash_del(struct hci_dev *hdev, struct hci_conn *c)
 	case ESCO_LINK:
 		h->sco_num--;
 		break;
-	}
-}
-
-static inline unsigned int hci_conn_num(struct hci_dev *hdev, __u8 type)
-{
-	struct hci_conn_hash *h = &hdev->conn_hash;
-	switch (type) {
-	case ACL_LINK:
-		return h->acl_num;
-	case LE_LINK:
-		return h->le_num;
-	case SCO_LINK:
-	case ESCO_LINK:
-		return h->sco_num;
-	default:
-		return 0;
 	}
 }
 

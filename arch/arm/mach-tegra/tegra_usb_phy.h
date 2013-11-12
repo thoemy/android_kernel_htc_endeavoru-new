@@ -80,7 +80,6 @@ struct tegra_usb_phy {
 	struct clk *emc_clk;
 	struct clk *sys_clk;
 	struct regulator *vdd_reg;
-	struct regulator *hsic_reg;
 	struct regulator *vbus_reg;
 	struct tegra_usb_phy_ops *ops;
 	struct tegra_xtal_freq *freq;
@@ -95,8 +94,7 @@ struct tegra_usb_phy {
 	bool phy_power_on;
 	bool remote_wakeup;
 	bool hw_accessible;
-	bool pmc_sleepwalk;
-	bool bus_reseting;
+	bool ulpi_clk_padout_ena;
 };
 
 int usb_phy_reg_status_wait(void __iomem *reg, u32 mask,

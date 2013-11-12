@@ -18,6 +18,7 @@
  *
  */
 
+#include <linux/platform_data/ram_console.h>
 #include <linux/platform_device.h>
 #include <linux/console.h>
 #include <linux/init.h>
@@ -99,6 +100,7 @@ unsigned long tegra_grhost_aperture = ~0ul;
 static   bool is_tegra_debug_uart_hsport;
 static struct board_info pmu_board_info;
 static struct board_info display_board_info;
+unsigned long g_panel_id;
 static struct board_info camera_board_info;
 
 static int pmu_core_edp = 1200;	/* default 1.2V EDP limit */
@@ -510,6 +512,17 @@ enum power_supply_type get_power_supply_type(void)
 {
 	return pow_supply_type;
 }
+
+static int __init tegra_bootloader_panel_arg(char *options)
+{
+	char *p = options;
+	g_panel_id = memparse(p, &p);
+
+	pr_info("Found panel_vendor: %0lx\n", g_panel_id);
+	return 1;
+}
+__setup("panel_id=", tegra_bootloader_panel_arg);
+
 static int __init tegra_board_power_supply_type(char *options)
 {
 	if (!strcmp(options, "Adapter"))
@@ -704,6 +717,30 @@ static int __init tegra_commchip_id(char *id)
 	return 1;
 }
 
+#ifdef CONFIG_ANDROID_RAM_CONSOLE_APPEND_PMIC_STATUS_BITS
+static char *last_off_event = "NULL";
+static int __init pmic_last_off_event(char *opt)
+{
+	if (!opt || !*opt || *opt == '\0')
+		return 1;
+	pr_debug("ram_console: last_off_event=%s", opt);
+	last_off_event = opt;
+	return 1;
+}
+__setup("last_off_event=", pmic_last_off_event);
+
+static char *start_on_event = "NULL";
+static int __init pmic_start_on_event(char *opt)
+{
+	if (!opt || !*opt || *opt == '\0')
+		return 1;
+	pr_debug("ram_console: start_on_event=%s", opt);
+	start_on_event = opt;
+	return 1;
+}
+__setup("start_on_event=", pmic_start_on_event);
+#endif
+
 int tegra_get_commchip_id(void)
 {
 	return commchip_id;
@@ -879,6 +916,9 @@ void __init tegra_reserve(unsigned long carveout_size, unsigned long fb_size,
 		tegra_vpr_start,
 		tegra_vpr_size ?
 			tegra_vpr_start + tegra_vpr_size - 1 : 0);
+#if defined(CONFIG_HTC_PROJECT)
+	nvdumper_reserve_init();
+#endif
 }
 
 static struct resource ram_console_resources[] = {
@@ -887,11 +927,24 @@ static struct resource ram_console_resources[] = {
 	},
 };
 
+#ifdef CONFIG_ANDROID_RAM_CONSOLE_APPEND_PMIC_STATUS_BITS
+#define PMIC_STATUS_MAX 100
+static char pmic_status_buffer[PMIC_STATUS_MAX] = {0};
+static struct ram_console_platform_data console_data = {
+	.bootinfo	= pmic_status_buffer,
+};
+#endif
+
 static struct platform_device ram_console_device = {
 	.name 		= "ram_console",
 	.id 		= -1,
 	.num_resources	= ARRAY_SIZE(ram_console_resources),
 	.resource	= ram_console_resources,
+#ifdef CONFIG_ANDROID_RAM_CONSOLE_APPEND_PMIC_STATUS_BITS
+	.dev		= {
+		.platform_data = &console_data,
+	},
+#endif
 };
 
 void __init tegra_ram_console_debug_reserve(unsigned long ram_console_size)
@@ -920,6 +973,12 @@ void __init tegra_ram_console_debug_init(void)
 {
 	int err;
 
+#ifdef CONFIG_ANDROID_RAM_CONSOLE_APPEND_PMIC_STATUS_BITS
+	snprintf(pmic_status_buffer, sizeof(pmic_status_buffer),
+		"start_on_event=%s, last_off_event=%s\n",
+		start_on_event, last_off_event);
+#endif
+
 	err = platform_device_register(&ram_console_device);
 	if (err) {
 		pr_err("%s: ram console registration failed (%d)!\n", __func__, err);
@@ -934,79 +993,255 @@ void __init tegra_release_bootloader_fb(void)
 						tegra_bootloader_fb_size))
 			pr_err("Failed to free bootloader fb.\n");
 }
+#if defined CONFIG_TEGRA_INTERACTIVE_GOV_ON_EARLY_SUSPEND \
+	|| defined CONFIG_TEGRA_CONSERVATIVE_GOV_ON_EARLY_SUSPEND
+static char cpufreq_gov_default[32];
+static char saved_boost_factor[32];
+static char saved_go_maxspeed_load[32];
+static char saved_max_boost[32];
+static char saved_sustain_load[32];
 
-#ifdef CONFIG_TEGRA_CONVSERVATIVE_GOV_ON_EARLYSUPSEND
-char cpufreq_default_gov[CONFIG_NR_CPUS][MAX_GOV_NAME_LEN];
-char *cpufreq_conservative_gov = "conservative";
+static char saved_up_threshold[32];
+static char saved_down_threshold[32];
+static char saved_freq_step[32];
 
-void cpufreq_store_default_gov(void)
+
+void cpufreq_set_governor(char *governor)
 {
-	unsigned int cpu = 0;
-	struct cpufreq_policy *policy;
+	struct file *scaling_gov = NULL;
+	mm_segment_t old_fs;
+	char    buf[128];
+	int i = 0;
+	loff_t offset = 0;
 
+	if (governor == NULL)
+		return;
+
+	/* change to KERNEL_DS address limit */
+	old_fs = get_fs();
+	set_fs(KERNEL_DS);
 #ifndef CONFIG_TEGRA_AUTO_HOTPLUG
-	for_each_online_cpu(cpu)
+//	for_each_online_cpu(i)
 #endif
 	{
-		policy = cpufreq_cpu_get(cpu);
-		if (policy && policy->governor) {
-			sprintf(cpufreq_default_gov[cpu], "%s",
-					policy->governor->name);
-			cpufreq_cpu_put(policy);
+		sprintf(buf, CPUFREQ_SYSFS_PLACE_HOLDER, i);
+		scaling_gov = filp_open(buf, O_RDWR, 0);
+		if (IS_ERR_OR_NULL(scaling_gov)) {
+			pr_err("%s. Can't open %s\n", __func__, buf);
 		} else {
-			/* No policy or no gov set for this
-			 * online cpu. If we are here, require
-			 * serious debugging hence setting
-			 * as pr_error.
-			 */
-			pr_err("No gov or No policy for online cpu:%d,"
-					, cpu);
+			if (scaling_gov->f_op != NULL &&
+				scaling_gov->f_op->write != NULL)
+				scaling_gov->f_op->write(scaling_gov,
+						governor,
+						strlen(governor),
+						&offset);
+			else
+				pr_err("f_op might be null\n");
+
+			filp_close(scaling_gov, NULL);
 		}
 	}
+	set_fs(old_fs);
 }
 
-void cpufreq_change_gov(char *target_gov)
+static void cpufreq_read_governor_param(char *param_path, char *name, char *value)
 {
-	int ret = -EINVAL;
-	unsigned int cpu = 0;
+	struct file *gov_param = NULL;
+	mm_segment_t old_fs;
+	static char buf[128];
+	loff_t offset = 0;
 
-#ifndef CONFIG_TEGRA_AUTO_HOTPLUG
-	for_each_online_cpu(cpu)
-#endif
-	{
-		ret = cpufreq_set_gov(target_gov, cpu);
-		if (ret < 0)
-			/* Unable to set gov for the online cpu.
-			 * If it happens, needs to debug.
-			 */
-			pr_info("Unable to set gov:%s for online cpu:%d,"
-				, cpufreq_default_gov[cpu]
-					, cpu);
+	if (!value || !param_path || !name)
+		return;
+
+	/* change to KERNEL_DS address limit */
+	old_fs = get_fs();
+	set_fs(KERNEL_DS);
+
+	sprintf(buf, CPUFREQ_GOV_PARAM, param_path, name);
+	gov_param = filp_open(buf, O_RDONLY, 0);
+	if (!IS_ERR_OR_NULL(gov_param)) {
+		if (gov_param->f_op != NULL &&
+			gov_param->f_op->read != NULL)
+			gov_param->f_op->read(gov_param,
+					value,
+					32,
+					&offset);
+		else
+			pr_err("f_op might be null\n");
+
+		filp_close(gov_param, NULL);
+	} else {
+		pr_err("%s. Can't open %s\n", __func__, buf);
+	}
+	set_fs(old_fs);
+}
+
+static void set_governor_param(char *param_path, char *name, char *value)
+{
+	struct file *gov_param = NULL;
+	mm_segment_t old_fs;
+	static char buf[128];
+	loff_t offset = 0;
+
+	/* change to KERNEL_DS address limit */
+	old_fs = get_fs();
+	set_fs(KERNEL_DS);
+
+	sprintf(buf, CPUFREQ_GOV_PARAM, param_path, name);
+	gov_param = filp_open(buf, O_RDWR, 0);
+	if (!IS_ERR_OR_NULL(gov_param)) {
+		if (gov_param->f_op != NULL &&
+			gov_param->f_op->write != NULL)
+			gov_param->f_op->write(gov_param,
+					value,
+					strlen(value),
+					&offset);
+		else
+			pr_err("f_op might be null\n");
+
+		filp_close(gov_param, NULL);
+	}
+	set_fs(old_fs);
+}
+
+void cpufreq_set_governor_param(char *param_path, char *name, int value)
+{
+	char buf[32];
+	sprintf(buf, "%d", value);
+	set_governor_param(param_path, name, buf);
+}
+
+
+void cpufreq_save_governor(void)
+{
+	struct file *scaling_gov = NULL;
+	mm_segment_t old_fs;
+	char    buf[128];
+	loff_t offset = 0;
+
+	/* change to KERNEL_DS address limit */
+	old_fs = get_fs();
+	set_fs(KERNEL_DS);
+
+	buf[127] = 0;
+	sprintf(buf, CPUFREQ_SYSFS_PLACE_HOLDER,0);
+	scaling_gov = filp_open(buf, O_RDONLY, 0);
+	if (!IS_ERR_OR_NULL(scaling_gov)) {
+		if (scaling_gov->f_op != NULL &&
+			scaling_gov->f_op->read != NULL)
+			scaling_gov->f_op->read(scaling_gov,
+					cpufreq_gov_default,
+					32,
+					&offset);
+		else
+			pr_err("f_op might be null\n");
+
+		filp_close(scaling_gov, NULL);
+	} else {
+		pr_err("%s. Can't open %s\n", __func__, buf);
+	}
+	if (strncmp(cpufreq_gov_default,INTERACTIVE_GOVERNOR,
+				strlen(INTERACTIVE_GOVERNOR)) == 0) {
+		cpufreq_read_governor_param(INTERACTIVE_GOVERNOR, BOOST_FACTOR,
+					saved_boost_factor);
+		cpufreq_read_governor_param(INTERACTIVE_GOVERNOR, GO_MAXSPEED_LOAD,
+					saved_go_maxspeed_load);
+		cpufreq_read_governor_param(INTERACTIVE_GOVERNOR, MAX_BOOST,
+					saved_max_boost);
+		cpufreq_read_governor_param(INTERACTIVE_GOVERNOR, SUSTAIN_LOAD,
+					saved_sustain_load);
+	} else if (strncmp(cpufreq_gov_default, CONSERVATIVE_GOVERNOR,
+				strlen(CONSERVATIVE_GOVERNOR)) == 0) {
+		cpufreq_read_governor_param(CONSERVATIVE_GOVERNOR, UP_THRESHOLD,
+					saved_up_threshold);
+		cpufreq_read_governor_param(CONSERVATIVE_GOVERNOR, DOWN_THRESHOLD,
+					saved_down_threshold);
+		cpufreq_read_governor_param(CONSERVATIVE_GOVERNOR, FREQ_STEP,
+					saved_freq_step);
+	} else {
+	}
+	set_fs(old_fs);
+}
+
+void cpufreq_restore_governor(void)
+{
+	cpufreq_set_governor(cpufreq_gov_default);
+
+	if (strncmp(cpufreq_gov_default,INTERACTIVE_GOVERNOR,
+				strlen(INTERACTIVE_GOVERNOR)) == 0) {
+		set_governor_param(INTERACTIVE_GOVERNOR, BOOST_FACTOR,
+					saved_boost_factor);
+		set_governor_param(INTERACTIVE_GOVERNOR, GO_MAXSPEED_LOAD,
+					saved_go_maxspeed_load);
+		set_governor_param(INTERACTIVE_GOVERNOR, MAX_BOOST,
+					saved_max_boost);
+		set_governor_param(INTERACTIVE_GOVERNOR, SUSTAIN_LOAD,
+					saved_sustain_load);
+	} else if (strncmp(cpufreq_gov_default, CONSERVATIVE_GOVERNOR,
+				strlen(CONSERVATIVE_GOVERNOR)) == 0) {
+		set_governor_param(CONSERVATIVE_GOVERNOR, UP_THRESHOLD,
+					saved_up_threshold);
+		set_governor_param(CONSERVATIVE_GOVERNOR, DOWN_THRESHOLD,
+					saved_down_threshold);
+		set_governor_param(CONSERVATIVE_GOVERNOR, FREQ_STEP,
+					saved_freq_step);
 	}
 }
+#endif /* TEGRA_CONSERVATIVE_GOV_ON_EARLY_SUSPEND ||
+		TEGRA_INTERACTIVE_GOV_ON_EARLY_SUSPEND*/
 
-void cpufreq_restore_default_gov(void)
-{
-	int ret = -EINVAL;
-	unsigned int cpu = 0;
 
-#ifndef CONFIG_TEGRA_AUTO_HOTPLUG
-	for_each_online_cpu(cpu)
-#endif
+#if defined(CONFIG_MEMORY_FOOTPRINT_DEBUGGING)
+static struct resource memory_footprint_resources[] = {
 	{
-		if (&cpufreq_default_gov[cpu] &&
-			strlen((const char *)&cpufreq_default_gov[cpu])) {
-			ret = cpufreq_set_gov(cpufreq_default_gov[cpu], cpu);
-			if (ret < 0)
-				/* Unable to restore gov for the cpu as
-				 * It was online on suspend and becomes
-				 * offline on resume.
-				 */
-				pr_info("Unable to restore gov:%s for cpu:%d,"
-						, cpufreq_default_gov[cpu]
-							, cpu);
-		}
-		cpufreq_default_gov[cpu][0] = '\0';
+		.flags = IORESOURCE_MEM,
+	},
+};
+
+static struct platform_device memory_footprint_device = {
+	.name 		= "memory_footprint",
+	.id 		= -1,
+	.num_resources	= ARRAY_SIZE(memory_footprint_resources),
+	.resource	= memory_footprint_resources,
+};
+
+void __init htc_memory_footprint_space_reserve(unsigned long size)
+{
+	struct resource *res;
+	long ret;
+
+	pr_info("[MF] %s\n", __func__);
+
+	res = platform_get_resource(&memory_footprint_device, IORESOURCE_MEM, 0);
+	if (!res) {
+		pr_err("[MF] Failed to find memory resource for memory footprint");
+		goto fail;
 	}
+
+	res->start = memblock_end_of_DRAM() - size;
+	res->end = res->start + size - 1;
+	ret = memblock_remove(res->start, size);
+	if (ret) {
+		pr_err("[MF] Failed to reserve memory block for memory footprint\n");
+		goto fail;
+	} else
+		pr_info("[MF] memory_footprint_space_reserve  start=%zx, end=%zx\n", res->start, res->end);
+
+	return;
+fail:
+	memory_footprint_device.resource = NULL;
+	memory_footprint_device.num_resources = 0;
 }
-#endif /* CONFIG_TEGRA_CONVSERVATIVE_GOV_ON_EARLYSUPSEND */
+
+void __init htc_memory_footprint_init(void)
+{
+	int err;
+
+	pr_info("[MF] %s\n", __func__);
+
+	err = platform_device_register(&memory_footprint_device);
+	if (err)
+		pr_err("[MF] %s: memory footprint registeration failed (%d)!\n", __func__, err);
+}
+#endif

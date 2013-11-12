@@ -692,6 +692,7 @@ static void destroy_client(struct nvmap_client *client)
 		while (dupes--)
 			nvmap_handle_put(ref->handle);
 
+		NVMAP_MAGIC_FREE(ref);
 		kfree(ref);
 	}
 
@@ -990,8 +991,8 @@ static void allocations_stringify(struct nvmap_client *client,
 		if (handle->alloc && handle->heap_pgalloc == iovmm) {
 			unsigned long base = iovmm ? 0:
 				(unsigned long)(handle->carveout->base);
-			seq_printf(s, "%-18s %-18s %8lx %10u %8x\n", "", "",
-					base, handle->size, handle->userflags);
+			seq_printf(s, "%-18s %-18s %8lx %10u %8x %8x\n", "", "",
+					base, handle->size, handle->userflags, (unsigned int)handle);
 		}
 	}
 }

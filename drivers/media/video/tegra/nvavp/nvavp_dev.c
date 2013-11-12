@@ -127,8 +127,6 @@ struct nvavp_info {
 	/* client for driver allocations, persistent */
 	struct nvmap_client		*nvmap;
 
-	bool				pending;
-
 	struct nvavp_channel		channel_info[NVAVP_NUM_CHANNELS];
 
 	u32				syncpt_id;
@@ -139,6 +137,8 @@ struct nvavp_info {
 #if defined(CONFIG_TEGRA_NVAVP_AUDIO)
 	struct miscdevice		audio_misc_dev;
 #endif
+
+	bool                            pending;
 };
 
 struct nvavp_clientctx {
@@ -278,8 +278,8 @@ static void clock_disable_handler(struct work_struct *work)
 
 	nvavp = container_of(work, struct nvavp_info,
 			    clock_disable_work);
-	channel_info = nvavp_get_channel_info(nvavp, NVAVP_VIDEO_CHANNEL);
 
+	channel_info = nvavp_get_channel_info(nvavp, NVAVP_VIDEO_CHANNEL);
 	mutex_lock(&channel_info->pushbuffer_lock);
 	mutex_lock(&nvavp->open_lock);
 	if (nvavp_check_idle(nvavp) && nvavp->pending) {
@@ -1225,14 +1225,14 @@ static int nvavp_force_clock_stay_on_ioctl(struct file *filp, unsigned int cmd,
 	struct nvavp_clock_stay_on_state_args clock;
 
 	if (copy_from_user(&clock, (void __user *)arg,
-			   sizeof(struct nvavp_clock_stay_on_state_args)))
+			sizeof(struct nvavp_clock_stay_on_state_args)))
 		return -EFAULT;
 
 	dev_dbg(&nvavp->nvhost_dev->dev, "%s: state=%d\n",
 		__func__, clock.state);
 
 	if (clock.state != NVAVP_CLOCK_STAY_ON_DISABLED &&
-	    clock.state !=  NVAVP_CLOCK_STAY_ON_ENABLED) {
+		clock.state !=  NVAVP_CLOCK_STAY_ON_ENABLED) {
 		dev_err(&nvavp->nvhost_dev->dev, "%s: invalid argument=%d\n",
 			__func__, clock.state);
 		return -EINVAL;
@@ -1244,7 +1244,7 @@ static int nvavp_force_clock_stay_on_ioctl(struct file *filp, unsigned int cmd,
 			nvavp_clks_enable(nvavp);
 	} else {
 		if (--clientctx->clk_reqs == 0)
-			nvavp_clks_disable(nvavp);
+		nvavp_clks_disable(nvavp);
 	}
 	mutex_unlock(&nvavp->open_lock);
 	return 0;
@@ -1319,9 +1319,9 @@ static int tegra_nvavp_release(struct inode *inode, struct file *filp)
 		goto out;
 	}
 
-	/* if this client had any requests, drop our clk ref */
-	if (clientctx->clk_reqs)
-		nvavp_clks_disable(nvavp);
+        /* if this client had any requests, drop our clk ref */
+        if (clientctx->clk_reqs)
+                nvavp_clks_disable(nvavp);
 
 	if (nvavp->refcount > 0)
 		nvavp->refcount--;

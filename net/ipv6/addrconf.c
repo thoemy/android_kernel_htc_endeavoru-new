@@ -238,6 +238,9 @@ const struct in6_addr in6addr_loopback = IN6ADDR_LOOPBACK_INIT;
 const struct in6_addr in6addr_linklocal_allnodes = IN6ADDR_LINKLOCAL_ALLNODES_INIT;
 const struct in6_addr in6addr_linklocal_allrouters = IN6ADDR_LINKLOCAL_ALLROUTERS_INIT;
 
+/* HTC add */
+static unsigned int temp_eui[4] = {0};
+
 /* Check if a valid qdisc is available */
 static inline bool addrconf_qdisc_ok(const struct net_device *dev)
 {
@@ -1570,8 +1573,16 @@ static int addrconf_ifid_gre(u8 *eui, struct net_device *dev)
 
 static int ipv6_generate_eui64(u8 *eui, struct net_device *dev)
 {
+	int i=0;
+
 	switch (dev->type) {
-	case ARPHRD_ETHER:
+	case ARPHRD_ETHER:{
+		for(i=0; i<4; i++){
+			eui[i*2] = (temp_eui[i] & 0xFF00) >> 8;
+			eui[i*2+1] = temp_eui[i] & 0xFF;
+		}
+		return 0;
+	}
 	case ARPHRD_FDDI:
 	case ARPHRD_IEEE802_TR:
 		return addrconf_ifid_eui48(eui, dev);
@@ -4208,6 +4219,16 @@ static void ipv6_ifa_notify(int event, struct inet6_ifaddr *ifp)
 		__ipv6_ifa_notify(event, ifp);
 	rcu_read_unlock_bh();
 }
+
+// add by htc
+static struct kernel_param_ops temp_eui_ops = {
+	.set = param_set_uint,
+	.get = param_get_uint,
+};
+module_param_cb(temp_eui0, &temp_eui_ops, &(temp_eui[0]), 0644);
+module_param_cb(temp_eui1, &temp_eui_ops, &(temp_eui[1]), 0644);
+module_param_cb(temp_eui2, &temp_eui_ops, &(temp_eui[2]), 0644);
+module_param_cb(temp_eui3, &temp_eui_ops, &(temp_eui[3]), 0644);
 
 #ifdef CONFIG_SYSCTL
 

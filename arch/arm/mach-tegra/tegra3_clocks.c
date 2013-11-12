@@ -41,6 +41,8 @@
 #include "sleep.h"
 #include "tegra3_emc.h"
 
+#include <mach/mfootprint.h>
+
 #define RST_DEVICES_L			0x004
 #define RST_DEVICES_H			0x008
 #define RST_DEVICES_U			0x00C
@@ -311,6 +313,8 @@
 
 /* Threshold to engage CPU clock skipper during CPU rate change */
 #define SKIPPER_ENGAGE_RATE		 800000000
+
+extern spinlock_t dc_spinlock_clk;
 
 static void tegra3_pllp_init_dependencies(unsigned long pllp_rate);
 static int tegra3_clk_shared_bus_update(struct clk *bus);
@@ -841,6 +845,13 @@ static int tegra3_cpu_clk_set_rate(struct clk *c, unsigned long rate)
 	bool skip_to_backup =
 		skip && (clk_get_rate_all_locked(c) >= SKIPPER_ENGAGE_RATE);
 
+    /* for NV platform, all G cores consume the same clk source
+     *
+     * to port to any other platforms,
+     * pls. modify lt_rate to lt_rate[NR_CPUS] accordingly
+     */
+    static unsigned long lt_rate = 0;
+
 	if (c->dvfs) {
 		if (!c->dvfs->dvfs_rail)
 			return -ENOSYS;
@@ -912,6 +923,30 @@ static int tegra3_cpu_clk_set_rate(struct clk *c, unsigned long rate)
 		pr_err("Failed to switch cpu to clock %s\n", c->u.cpu.main->name);
 		goto out;
 	}
+
+#if defined(CONFIG_BEST_TRADE_HOTPLUG)
+    {
+        extern unsigned long *t_rate;
+        extern bool is_bthp_en (void);
+
+        if (likely(is_bthp_en ())) {
+            atomic_set((atomic_t *)&lt_rate, rate / 1000);
+            barrier();
+
+            /* for NV platform, all G cores consume the same clk source
+             *
+             * to port to any othe platforms,
+             * pls. modify t_rate to t_rate[NR_CPUS] accordingly
+             */
+            if (unlikely(!atomic_cmpxchg ((atomic_t *)&t_rate,
+                                          (int)NULL,
+                                          (int)&lt_rate)))
+            {
+                pr_bthp_info ("lt_rate is skirted...\n");
+            }
+        }
+    }
+#endif
 
 out:
 	if (skipped) {
@@ -1040,7 +1075,7 @@ static int tegra3_cpu_cmplx_clk_set_parent(struct clk *c, struct clk *p)
 		if (p == c->parent)		/* already switched - exit*/
 			return 0;
 
-		if (rate > p->max_rate) {	/* over-clocking - no switch */
+		if ((rate > p->max_rate) || (rate < p->min_rate)) {
 			pr_warn("%s: No %s mode switch to %s at rate %lu\n",
 				 __func__, c->name, p->name, rate);
 			return -ECANCELED;
@@ -1723,12 +1758,21 @@ static int tegra3_pll_clk_set_rate(struct clk *c, unsigned long rate)
 	if (val == old_base)
 		return 0;
 
+	MF_DEBUG("00000000");
 	if (c->state == ON) {
 		tegra3_pll_clk_disable(c);
 		val &= ~(PLL_BASE_BYPASS | PLL_BASE_ENABLE);
 	}
-	clk_writel(val, c->reg + PLL_BASE);
+	MF_DEBUG("00000001");
 
+	unsigned long flags;
+	if (c->reg == 0xd0)
+		spin_lock_irqsave(&dc_spinlock_clk, flags);
+	clk_writel(val, c->reg + PLL_BASE);
+	if (c->reg == 0xd0)
+		spin_unlock_irqrestore(&dc_spinlock_clk, flags);
+
+	MF_DEBUG("00000002");
 	if (c->flags & PLL_HAS_CPCON) {
 		val = clk_readl(c->reg + PLL_MISC(c));
 		val &= ~PLL_MISC_CPCON_MASK;
@@ -1748,6 +1792,7 @@ static int tegra3_pll_clk_set_rate(struct clk *c, unsigned long rate)
 	if (c->state == ON)
 		tegra3_pll_clk_enable(c);
 
+	MF_DEBUG("00000003");
 	return 0;
 }
 
@@ -3094,7 +3139,8 @@ static int tegra3_clk_shared_bus_update(struct clk *bus)
 		 */
 		if (c->u.shared_bus_user.enabled ||
 		    (c->u.shared_bus_user.mode == SHARED_CEILING)) {
-			if (!strcmp(c->name, "3d.emc"))
+			if (strcmp(c->name, "camera.emc") &&
+				!strcmp(c->name, "3d.emc"))
 				emc_bw_efficiency = tegra_emc_bw_efficiency;
 
 			switch (c->u.shared_bus_user.mode) {
@@ -4339,7 +4385,6 @@ struct clk tegra_list_clks[] = {
 	PERIPH_CLK("vcp",	"tegra-avp",		"vcp",	29,	0,	250000000, mux_clk_m, 			0),
 	PERIPH_CLK("bsea",	"tegra-avp",		"bsea",	62,	0,	250000000, mux_clk_m, 			0),
 	PERIPH_CLK("bsev",	"tegra-aes",		"bsev",	63,	0,	250000000, mux_clk_m, 			0),
-	PERIPH_CLK("cec",	"tegra_cec",	NULL,	136,	0,	26000000,	mux_clk_m,	PERIPH_ON_APB),
 	PERIPH_CLK("vde",	"vde",			NULL,	61,	0x1c8,	600000000, mux_pllp_pllc_pllm_clkm,	MUX | DIV_U71 | DIV_U71_INT),
 	PERIPH_CLK("csite",	"csite",		NULL,	73,	0x1d4,	144000000, mux_pllp_pllc_pllm_clkm,	MUX | DIV_U71), /* max rate ??? */
 	PERIPH_CLK("la",	"la",			NULL,	76,	0x1f8,	26000000,  mux_pllp_pllc_pllm_clkm,	MUX | DIV_U71),
@@ -4358,7 +4403,11 @@ struct clk tegra_list_clks[] = {
 	PERIPH_CLK("i2c5-fast",	"tegra-i2c.4",		"i2c-fast",	0,	0,	108000000, mux_pllp_out3,	PERIPH_NO_ENB),
 	PERIPH_CLK("uarta",	"tegra_uart.0",		NULL,	6,	0x178,	900000000, mux_pllp_pllc_pllm_clkm,	MUX | DIV_U151 | DIV_U151_UART | PERIPH_ON_APB),
 	PERIPH_CLK("uartb",	"tegra_uart.1",		NULL,	7,	0x17c,	900000000, mux_pllp_pllc_pllm_clkm,	MUX | DIV_U151 | DIV_U151_UART | PERIPH_ON_APB),
+#ifdef CONFIG_SERIAL_TEGRA_BRCM
+	PERIPH_CLK("uartc",	"tegra_uart_brcm.2",		NULL,	55,	0x1a0,	900000000, mux_pllp_pllc_pllm_clkm,	MUX | DIV_U151 | DIV_U151_UART | PERIPH_ON_APB),
+#else
 	PERIPH_CLK("uartc",	"tegra_uart.2",		NULL,	55,	0x1a0,	900000000, mux_pllp_pllc_pllm_clkm,	MUX | DIV_U151 | DIV_U151_UART | PERIPH_ON_APB),
+#endif
 	PERIPH_CLK("uartd",	"tegra_uart.3",		NULL,	65,	0x1c0,	900000000, mux_pllp_pllc_pllm_clkm,	MUX | DIV_U151 | DIV_U151_UART | PERIPH_ON_APB),
 	PERIPH_CLK("uarte",	"tegra_uart.4",		NULL,	66,	0x1c4,	900000000, mux_pllp_pllc_pllm_clkm,	MUX | DIV_U151 | DIV_U151_UART | PERIPH_ON_APB),
 	PERIPH_CLK("uarta_dbg",	"serial8250.0",		"uarta", 6,	0x178,	900000000, mux_pllp_clkm,		MUX | DIV_U151 | DIV_U151_UART | PERIPH_ON_APB),
@@ -4420,6 +4469,7 @@ struct clk tegra_list_clks[] = {
 	SHARED_CLK("sbc4.sclk", "spi_tegra.3",		"sclk", &tegra_clk_sbus_cmplx, NULL, 0, 0),
 	SHARED_CLK("sbc5.sclk", "spi_tegra.4",		"sclk", &tegra_clk_sbus_cmplx, NULL, 0, 0),
 	SHARED_CLK("sbc6.sclk", "spi_tegra.5",		"sclk", &tegra_clk_sbus_cmplx, NULL, 0, 0),
+	SHARED_CLK("camera.sclk",	"tegra_camera",	"sclk",	&tegra_clk_sbus_cmplx, NULL, 0, 0),
 
 	SHARED_CLK("avp.emc",	"tegra-avp",		"emc",	&tegra_clk_emc, NULL, 0, 0),
 	SHARED_CLK("cpu.emc",	"cpu",			"emc",	&tegra_clk_emc, NULL, 0, 0),
@@ -4468,6 +4518,8 @@ struct clk tegra_list_clks[] = {
  * table under two names.
  */
 struct clk_duplicate tegra_clk_duplicates[] = {
+	CLK_DUPLICATE("vi_sensor", NULL, "vi_sensor"),
+	CLK_DUPLICATE("csus", NULL, "csus"),
 	CLK_DUPLICATE("usbd", "utmip-pad", NULL),
 	CLK_DUPLICATE("usbd", "tegra-ehci.0", NULL),
 	CLK_DUPLICATE("usbd", "tegra-otg", NULL),
@@ -4810,9 +4862,9 @@ static struct cpufreq_frequency_table freq_table_1p7GHz[] = {
 	{ 0,   51000 },
 	{ 1,  102000 },
 	{ 2,  204000 },
-	{ 3,  370000 },
+	{ 3,  340000 },
 	{ 4,  475000 },
-	{ 5,  620000 },
+	{ 5,  640000 },
 	{ 6,  760000 },
 	{ 7,  910000 },
 	{ 8, 1000000 },
@@ -4908,6 +4960,15 @@ struct tegra_cpufreq_table_data *tegra_cpufreq_table_get(void)
 	return NULL;
 }
 
+static unsigned long emc_max_rate_threshold = 1100000;
+module_param(emc_max_rate_threshold, ulong, 0644);
+
+static unsigned long emc_balance_threshold = 640000;
+module_param(emc_balance_threshold, ulong, 0644);
+
+static unsigned long emc_balance_rate = 437000000;
+module_param(emc_balance_rate, ulong, 0644);
+
 /* On DDR3 platforms there is an implicit dependency in this mapping: when cpu
  * exceeds max dvfs level for LP CPU clock at TEGRA_EMC_BRIDGE_MVOLTS_MIN, the
  * respective emc rate should be above TEGRA_EMC_BRIDGE_RATE_MIN
@@ -4923,8 +4984,10 @@ unsigned long tegra_emc_to_cpu_ratio(unsigned long cpu_rate)
 
 	/* Vote on memory bus frequency based on cpu frequency;
 	   cpu rate is in kHz, emc rate is in Hz */
-	if (cpu_rate >= 925000)
-		return emc_max_rate;	/* cpu >= 925 MHz, emc max */
+	if (cpu_rate >= emc_max_rate_threshold)
+		return emc_max_rate;	/* cpu >= 1100 MHz, emc max */
+    else if (emc_balance_threshold && cpu_rate >= emc_balance_threshold)
+        return emc_balance_rate;/* cpu >= 640 MHz, 437 MHz */
 	else if (cpu_rate >= 450000)
 		return emc_max_rate/2;	/* cpu >= 450 MHz, emc max/2 */
 	else if (cpu_rate >= 250000)

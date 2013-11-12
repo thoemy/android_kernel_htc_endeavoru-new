@@ -28,6 +28,8 @@
 #include "hda_codec.h"
 #include "hda_local.h"
 
+static bool bNeedLog = false;
+
 enum eld_versions {
 	ELD_VER_CEA_861D	= 2,
 	ELD_VER_PARTIAL		= 31,
@@ -151,8 +153,9 @@ static unsigned int hdmi_get_eld_data(struct hda_codec *codec, hda_nid_t nid,
 
 	val = snd_hda_codec_read(codec, nid, 0,
 					AC_VERB_GET_HDMI_ELDD, byte_index);
-#ifdef BE_PARANOID
-	printk(KERN_INFO "HDMI: ELD data byte %d: 0x%x\n", byte_index, val);
+#if 1//def BE_PARANOID
+	if(bNeedLog)
+		printk(KERN_INFO "HDMI: ELD data byte %d: 0x%x\n", byte_index, val);
 #endif
 	return val;
 }
@@ -336,7 +339,8 @@ static int hdmi_update_lpcm_sad_eld (struct hda_codec *codec, hda_nid_t nid,
 	int i, j;
 	u32 val, sad_base;
 	struct cea_sad *a;
-
+	printk(KERN_INFO "ENTERING hdmi_update_lpcm_sad_eld()");
+	bNeedLog = true;
 	val = hdmi_get_eld_byte(codec, nid, 0);
 	e->eld_ver = GET_BITS(val, 3, 5);
 	if (e->eld_ver != ELD_VER_CEA_861D &&
@@ -384,8 +388,9 @@ static int hdmi_update_lpcm_sad_eld (struct hda_codec *codec, hda_nid_t nid,
 			if (val & (1 << j))
 				a->sample_bits |= cea_sample_sizes[j + 1];
 	}
-
+	bNeedLog = false;
 	e->lpcm_sad_ready = 1;
+	printk(KERN_INFO "Leaving: hdmi_update_lpcm_sad_eld(), set e->lpcm_sad_ready = 1");
 	return 0;
 
 out_fail:
@@ -406,7 +411,7 @@ int snd_hdmi_get_eld(struct hdmi_eld *eld,
 	int ret;
 	int size;
 	unsigned char *buf;
-
+	printk(KERN_INFO "ENTERING snd_hdmi_get_eld()");
 	size = snd_hdmi_get_eld_size(codec, nid);
 	if (size == 0) {
 		/* wfg: workaround for ASUS P5E-VM HDMI board */

@@ -43,6 +43,7 @@
 #define TEGRA_I2C_RETRIES			3
 #define BYTES_PER_FIFO_WORD			4
 
+#define I2C_UNKNOWN_RETRY_TIME                  500
 #define I2C_CNFG				0x000
 #define I2C_CNFG_DEBOUNCE_CNT_SHIFT		12
 #define I2C_CNFG_PACKET_MODE_EN			(1<<10)
@@ -520,20 +521,22 @@ static irqreturn_t tegra_i2c_isr(int irq, void *dev_id)
 	u32 status;
 	const u32 status_err = I2C_INT_NO_ACK | I2C_INT_ARBITRATION_LOST | I2C_INT_TX_FIFO_OVERFLOW;
 	struct tegra_i2c_dev *i2c_dev = dev_id;
-
+	int times = 0;
 	status = i2c_readl(i2c_dev, I2C_INT_STATUS);
 
 	if (status == 0) {
-		dev_warn(i2c_dev->dev, "unknown interrupt Add 0x%02x\n",
-						i2c_dev->msg_add);
-		i2c_dev->msg_err |= I2C_ERR_UNKNOWN_INTERRUPT;
-
-		if (!i2c_dev->irq_disabled) {
-			disable_irq_nosync(i2c_dev->irq);
-			i2c_dev->irq_disabled = 1;
+		printk(KERN_INFO "[I2C]Unknown interrupt happen\n");
+		//Read I2C INT STATUS repetitiously for timing issue
+		while(status == 0 && times < I2C_UNKNOWN_RETRY_TIME){
+			status = i2c_readl(i2c_dev, I2C_INT_STATUS);
+			times++;
+			if(times == (I2C_UNKNOWN_RETRY_TIME -1) ){
+				dev_warn(i2c_dev->dev, "unknown interrupt Add 0x%02x\n",i2c_dev->msg_add);
+				i2c_dev->msg_err |= I2C_ERR_UNKNOWN_INTERRUPT;
+				goto err;
+			}
 		}
-
-		goto err;
+		printk(KERN_INFO "[I2C]Retry unknown interrupt success\n");
 	}
 
 	if (unlikely(status & status_err)) {
@@ -763,6 +766,15 @@ static int tegra_i2c_xfer_msg(struct tegra_i2c_bus *i2c_bus,
 	return -EIO;
 }
 
+bool tegra_i2c_is_ready(struct i2c_adapter *adap)
+{
+        struct tegra_i2c_bus *i2c_bus = i2c_get_adapdata(adap);
+        struct tegra_i2c_dev *i2c_dev = i2c_bus->dev;
+
+        return !(i2c_dev->is_suspended);
+}
+EXPORT_SYMBOL(tegra_i2c_is_ready);
+
 static int tegra_i2c_xfer(struct i2c_adapter *adap, struct i2c_msg msgs[],
 	int num)
 {
@@ -941,7 +953,7 @@ static int __devinit tegra_i2c_probe(struct platform_device *pdev)
 	}
 
 	ret = devm_request_irq(&pdev->dev, i2c_dev->irq,
-			tegra_i2c_isr, 0, pdev->name, i2c_dev);
+			tegra_i2c_isr, IRQF_NO_SUSPEND, pdev->name, i2c_dev);
 	if (ret) {
 		dev_err(&pdev->dev, "Failed to request irq %i\n", i2c_dev->irq);
 		return ret;
@@ -1065,8 +1077,6 @@ static const struct of_device_id tegra_i2c_of_match[] __devinitconst = {
 	{},
 };
 MODULE_DEVICE_TABLE(of, tegra_i2c_of_match);
-#else
-#define tegra_i2c_of_match NULL
 #endif
 
 static struct platform_driver tegra_i2c_driver = {

@@ -127,4 +127,3 @@ int tegra_dc_update_lut(struct tegra_dc *dc, int win_idx, int fboveride)
 	return 0;
 }
 EXPORT_SYMBOL(tegra_dc_update_lut);
-

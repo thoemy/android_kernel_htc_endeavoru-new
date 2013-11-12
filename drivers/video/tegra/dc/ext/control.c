@@ -74,8 +74,8 @@ static int get_output_edid(struct tegra_dc_ext_control_output_edid *edid)
 		return -EINVAL;
 
 	dc = tegra_dc_get_dc(edid->handle);
-
-	dc_edid = tegra_dc_get_edid(dc);
+	if (dc)
+		dc_edid = tegra_dc_get_edid(dc);
 	if (IS_ERR(dc_edid))
 		return PTR_ERR(dc_edid);
 
@@ -262,7 +262,7 @@ int tegra_dc_ext_control_init(void)
 		return ret;
 
 	control->dev = device_create(tegra_dc_ext_class,
-	     NULL, tegra_dc_ext_devno, NULL, "tegra_dc_ctrl");
+			NULL, tegra_dc_ext_devno, NULL, "tegra_dc_ctrl");
 	if (IS_ERR(control->dev)) {
 		ret = PTR_ERR(control->dev);
 		cdev_del(&control->cdev);

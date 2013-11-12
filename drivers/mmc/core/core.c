@@ -42,6 +42,9 @@
 #include "sdio_ops.h"
 
 static struct workqueue_struct *workqueue;
+extern int htc_mmc_needs_bkops;
+int htc_mmc_bkops_flag = 0;
+u64 bkops_start = 0;
 
 /*
  * Enabling software CRCs on the data blocks can be a significant (30%)
@@ -214,7 +217,22 @@ static void __mmc_start_req(struct mmc_host *host, struct mmc_request *mrq)
 static void mmc_wait_for_req_done(struct mmc_host *host,
 				  struct mmc_request *mrq)
 {
+#if defined(CONFIG_MACH_ENRC2U) || defined(CONFIG_MACH_ENRC2B) || defined(CONFIG_MACH_EVITAREUL)
+	if (host->index == 1) {
+		unsigned long timeout = 0;
+		timeout = wait_for_completion_timeout(&mrq->completion, msecs_to_jiffies(2000));
+		if (!timeout) {
+			printk("%s: wait for completion timeout!!\n",
+					mmc_hostname(host));
+			mrq->cmd->error = -ETIMEDOUT;
+		}
+	}
+	else {
+		wait_for_completion(&mrq->completion);
+	}
+#else
 	wait_for_completion(&mrq->completion);
+#endif
 }
 
 /**
@@ -320,6 +338,28 @@ void mmc_wait_for_req(struct mmc_host *host, struct mmc_request *mrq)
 }
 EXPORT_SYMBOL(mmc_wait_for_req);
 
+
+
+int mmc_read_bkops_status(struct mmc_card *card)
+{
+        int err;
+        u8 ext_csd[512];
+
+        mmc_claim_host(card->host);
+        err = mmc_send_ext_csd(card, ext_csd);
+        mmc_release_host(card->host);
+        if (err)
+                return err;
+
+        card->ext_csd.raw_bkops_status = ext_csd[EXT_CSD_BKOPS_STATUS];
+        card->ext_csd.raw_exception_status = ext_csd[EXT_CSD_EXP_EVENTS_STATUS];
+	if (card->ext_csd.raw_bkops_status == 3)
+		card->ext_csd.bkops_urgent_checking ++;
+        return 0;
+}
+EXPORT_SYMBOL(mmc_read_bkops_status);
+
+
 /**
  *	mmc_bkops_start - Issue start for mmc background ops
  *	@card: the MMC card associated with bkops
@@ -327,20 +367,58 @@ EXPORT_SYMBOL(mmc_wait_for_req);
  *
  *	Issued background ops without the busy wait.
  */
-int mmc_bkops_start(struct mmc_card *card, bool is_synchronous)
+
+
+int mmc_bkops_start(struct mmc_card *card, bool is_synchronous , bool checking_stauts)
 {
 	int err;
 	unsigned long flags;
-
+	static int bkops_status = 0;
+	static int count = 0;
 	BUG_ON(!card);
 
-	if (!card->ext_csd.bk_ops_en || mmc_card_doing_bkops(card))
-		return 1;
 
+	if (!card->ext_csd.bk_ops_en || mmc_card_doing_bkops(card))
+		return 2;
+
+
+        err = mmc_read_bkops_status(card);
+        if (err) {
+                pr_err("%s: Didn't read bkops status : %d\n",
+                       mmc_hostname(card->host), err);
+		mmc_card_clr_need_bkops(card);
+                return 3;
+        }
+
+
+	if ( bkops_status != card->ext_csd.raw_bkops_status) {
+		bkops_status = card->ext_csd.raw_bkops_status;
+		count = 1;
+		pr_info("mmc_bkops_start status = %d\n",
+			card->ext_csd.raw_bkops_status);
+	}
+	if (checking_stauts) {
+		if(card->ext_csd.raw_bkops_status < EXT_CSD_BKOPS_LEVEL_3) {
+			mmc_card_clr_need_bkops(card);
+			return 5;
+		}
+	}
+	++count;
+
+	if( (count % 10) == 0 ) {
+		pr_info("mmc_bkops_start status = %d\n",
+		card->ext_csd.raw_bkops_status);
+
+		count = 0;
+	}
 	mmc_claim_host(card->host);
+
+
 	err = mmc_send_bk_ops_cmd(card, is_synchronous);
+
+
 	if (err)
-		pr_err("%s: abort bk ops (%d error)\n",
+		pr_err("%s: abort bkops (%d error)\n",
 			mmc_hostname(card->host), err);
 
 	/*
@@ -350,8 +428,9 @@ int mmc_bkops_start(struct mmc_card *card, bool is_synchronous)
 	 */
 		spin_lock_irqsave(&card->host->lock, flags);
 		mmc_card_clr_need_bkops(card);
-		if (!is_synchronous)
+		if (!is_synchronous) {
 			mmc_card_set_doing_bkops(card);
+		}
 		spin_unlock_irqrestore(&card->host->lock, flags);
 
 	mmc_release_host(card->host);
@@ -373,6 +452,7 @@ int mmc_interrupt_hpi(struct mmc_card *card)
 	u32 status;
 	unsigned long flags;
 
+
 	BUG_ON(!card);
 
 	if (!mmc_card_mmc(card))
@@ -384,6 +464,7 @@ int mmc_interrupt_hpi(struct mmc_card *card)
 	}
 
 	mmc_claim_host(card->host);
+
 	err = mmc_send_status(card, &status);
 	if (err) {
 		pr_err("%s: Get card status fail\n", mmc_hostname(card->host));
@@ -818,7 +899,7 @@ static inline void mmc_set_ios(struct mmc_host *host)
 {
 	struct mmc_ios *ios = &host->ios;
 
-	pr_debug("%s: clock %uHz busmode %u powermode %u cs %u Vdd %u "
+	pr_info("%s: clock %uHz busmode %u powermode %u cs %u Vdd %u "
 		"width %u timing %u\n",
 		 mmc_hostname(host), ios->clock, ios->bus_mode,
 		 ios->power_mode, ios->chip_select, ios->vdd,
@@ -861,6 +942,7 @@ void mmc_set_clock(struct mmc_host *host, unsigned int hz)
 	__mmc_set_clock(host, hz);
 	mmc_host_clk_release(host);
 }
+EXPORT_SYMBOL(mmc_set_clock);
 
 #ifdef CONFIG_MMC_CLKGATE
 /*
@@ -1657,6 +1739,11 @@ static int mmc_do_erase(struct mmc_card *card, unsigned int from,
 		/* Do not retry else we can't see errors */
 		err = mmc_wait_for_cmd(card->host, &cmd, 0);
 		if (err || (cmd.resp[0] & 0xFDF92000)) {
+			if (cmd.resp[0] & 0x08000000) {
+				printk(KERN_ERR "Invalid erase parameters: ARG(0x%08x) FROM(0x%08x) TO(0x%08x)\n",
+					arg, from, to);
+			}
+
 			printk(KERN_ERR "error %d requesting status %#x\n",
 				err, cmd.resp[0]);
 			err = -EIO;
@@ -1703,6 +1790,11 @@ int mmc_erase(struct mmc_card *card, unsigned int from, unsigned int nr,
 	if (arg == MMC_SECURE_ERASE_ARG) {
 		if (from % card->erase_size || nr % card->erase_size)
 			return -EINVAL;
+	}
+
+	if (arg == MMC_DISCARD_ARG) {
+		if (nr < 16)
+			return 0;
 	}
 
 	if (arg == MMC_ERASE_ARG) {
@@ -1753,6 +1845,22 @@ int mmc_can_trim(struct mmc_card *card)
 	return 0;
 }
 EXPORT_SYMBOL(mmc_can_trim);
+
+int mmc_can_discard(struct mmc_card *card)
+{
+#ifdef DO_NOT_WORKAROUND_SAMSUNG_FN21_BUG
+	/*
+	 * As there's no way to detect the discard support bit at v4.5
+	 * use the s/w feature support filed.
+	 */
+	if (card->ext_csd.feature_support & MMC_DISCARD_FEATURE)
+		return 1;
+	return 0;
+#else
+	return 1;
+#endif
+}
+EXPORT_SYMBOL(mmc_can_discard);
 
 int mmc_can_secure_erase_trim(struct mmc_card *card)
 {
@@ -2109,12 +2217,30 @@ int mmc_suspend_host(struct mmc_host *host)
 {
 	int err = 0;
 
+
 	if (mmc_bus_needs_resume(host))
 		return 0;
+
 
 	if (mmc_card_mmc(host->card) && mmc_card_doing_bkops(host->card))
 		mmc_interrupt_hpi(host->card);
 	mmc_card_clr_need_bkops(host->card);
+
+
+         if (mmc_card_mmc(host->card)) {
+                        if (htc_mmc_needs_bkops > 0) {
+                                int ret = 0;
+                                pr_info("Force to do bkops at least %d ms\n",htc_mmc_needs_bkops);
+
+                                if (ret = mmc_bkops_start(host->card, false, false))
+                                        pr_err("mmc0: Failed to send bkops (%d)\n", ret);
+	                             htc_mmc_bkops_flag = 1;
+	                             bkops_start = ktime_to_ms(ktime_get_real());
+			}
+                }
+
+
+
 
 	if (host->caps & MMC_CAP_DISABLE)
 		cancel_delayed_work(&host->disable);

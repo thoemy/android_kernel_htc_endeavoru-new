@@ -500,7 +500,7 @@ static struct actmon_dev actmon_dev_emc = {
 	.boost_freq_step	= 16000,
 	.boost_up_coef		= 200,
 	.boost_down_coef	= 50,
-	.boost_up_threshold	= 60,
+	.boost_up_threshold	= 80,
 	.boost_down_threshold	= 40,
 
 	.up_wmark_window	= 1,

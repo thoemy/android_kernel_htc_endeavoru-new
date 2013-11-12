@@ -37,7 +37,7 @@
  * mutex 'mutex'.
  */
 struct logger_log {
-	unsigned char		*buffer;/* the ring buffer itself */
+	unsigned char 		*buffer;/* the ring buffer itself */
 	struct miscdevice	misc;	/* misc device representing the log */
 	wait_queue_head_t	wq;	/* wait queue for readers */
 	struct list_head	readers; /* this log's readers */
@@ -57,8 +57,8 @@ struct logger_reader {
 	struct logger_log	*log;	/* associated log */
 	struct list_head	list;	/* entry in logger_log's list */
 	size_t			r_off;	/* current read head offset */
-	bool			r_all;  /* reader can read all entries */
-	int			r_ver;  /* reader ABI version */
+	bool			r_all;	/* reader can read all entries */
+	int			r_ver;	/* reader ABI version */
 };
 
 /* logger_offset - returns index 'n' into the log via (optimized) modulus */
@@ -69,9 +69,9 @@ struct logger_reader {
  *
  * This isn't aesthetic. We have several goals:
  *
- *	1) Need to quickly obtain the associated log during an I/O operation
- *	2) Readers need to maintain state (logger_reader)
- *	3) Writers need to be very fast (open() should be a near no-op)
+ * 	1) Need to quickly obtain the associated log during an I/O operation
+ * 	2) Readers need to maintain state (logger_reader)
+ * 	3) Writers need to be very fast (open() should be a near no-op)
  *
  * In the reader case, we can trivially go file->logger_reader->logger_log.
  * For a writer, we don't want to maintain a logger_reader, so we just go
@@ -111,10 +111,6 @@ static struct logger_entry *get_entry_header(struct logger_log *log,
 /*
  * get_entry_msg_len - Grabs the length of the message of the entry
  * starting from from 'off'.
- *
- * An entry length is 2 bytes (16 bits) in host endian order.
- * In the log, the length does not include the size of the log entry structure.
- * This function returns the size including the log entry structure.
  *
  * Caller needs to hold log->mutex.
  */
@@ -205,7 +201,7 @@ static ssize_t do_read_log_to_user(struct logger_log *log,
 			return -EFAULT;
 
 	reader->r_off = logger_offset(reader->r_off +
-                sizeof(struct logger_entry) + count);
+		sizeof(struct logger_entry) + count);
 
 	return count + get_user_hdr_len(reader->r_ver);
 }
@@ -239,9 +235,9 @@ static size_t get_next_entry_by_uid(struct logger_log *log,
  *
  * Behavior:
  *
- *	- O_NONBLOCK works
- *	- If there are no log entries to read, blocks until log is written to
- *	- Atomically reads exactly one log entry
+ * 	- O_NONBLOCK works
+ * 	- If there are no log entries to read, blocks until log is written to
+ * 	- Atomically reads exactly one log entry
  *
  * Will set errno to EINVAL if read
  * buffer is insufficient to hold next entry.
@@ -537,12 +533,10 @@ static int logger_release(struct inode *ignored, struct file *file)
 	if (file->f_mode & FMODE_READ) {
 		struct logger_reader *reader = file->private_data;
 		struct logger_log *log = reader->log;
-
 		mutex_lock(&log->mutex);
 		list_del(&reader->list);
-		mutex_unlock(&log->mutex);
-
 		kfree(reader);
+		mutex_unlock(&log->mutex);
 	}
 
 	return 0;
@@ -683,8 +677,8 @@ static const struct file_operations logger_fops = {
 
 /*
  * Defines a log structure with name 'NAME' and a size of 'SIZE' bytes, which
- * must be a power of two, greater than LOGGER_ENTRY_MAX_LEN, and less than
- * LONG_MAX minus LOGGER_ENTRY_MAX_LEN.
+ * must be a power of two, and greater than
+ * (LOGGER_ENTRY_MAX_PAYLOAD + sizeof(struct logger_entry)).
  */
 #define DEFINE_LOGGER_DEVICE(VAR, NAME, SIZE) \
 static unsigned char _buf_ ## VAR[SIZE]; \
