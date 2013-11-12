@@ -40,7 +40,7 @@
 
 MODULE_LICENSE("GPL");
 
-unsigned long modem_ver = XMM_MODEM_VER_1130;
+unsigned long modem_ver = XMM_MODEM_VER_1121;
 EXPORT_SYMBOL(modem_ver);
 
 unsigned long modem_flash;
@@ -159,8 +159,7 @@ static int baseband_xmm_power_on(struct platform_device *device)
 	else
 		ipc_ap_wake_state = IPC_AP_WAKE_INIT2;
 
-	pr_debug("%s wake_st(%d) modem version %lu\n", __func__,
-				ipc_ap_wake_state, modem_ver);
+	pr_debug("%s - %d\n", __func__, __LINE__);
 
 	/* register usb host controller */
 	if (!modem_flash) {
@@ -247,8 +246,6 @@ static int baseband_xmm_power_off(struct platform_device *device)
 	wakeup_pending = false;
 	system_suspending = false;
 	spin_unlock_irqrestore(&xmm_lock, flags);
-	/* start registration process once again on xmm on */
-	register_hsic_device = true;
 	pr_debug("%s }\n", __func__);
 
 	return 0;
