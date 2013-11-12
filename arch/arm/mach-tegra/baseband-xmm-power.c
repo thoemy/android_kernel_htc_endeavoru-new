@@ -255,7 +255,6 @@ static ssize_t baseband_xmm_onoff(struct device *dev,
 	struct device_attribute *attr,
 	const char *buf, size_t count)
 {
-	int pwr;
 	int size;
 	struct platform_device *device = to_platform_device(dev);
 
@@ -272,20 +271,12 @@ static ssize_t baseband_xmm_onoff(struct device *dev,
 	pr_debug("%s: count=%d\n", __func__, count);
 
 	/* parse input */
-	size = sscanf(buf, "%d", &pwr);
+	size = sscanf(buf, "%d", &power_onoff);
 	if (size != 1) {
 		pr_err("%s: size=%d -EINVAL\n", __func__, size);
 		mutex_unlock(&xmm_onoff_mutex);
 		return -EINVAL;
 	}
-
-	if (power_onoff == pwr) {
-		pr_err("%s: Ignored, due to same CP power state(%d)\n",
-						__func__, power_onoff);
-		mutex_unlock(&xmm_onoff_mutex);
-		return -EINVAL;
-	}
-	power_onoff = pwr;
 	pr_debug("%s power_onoff=%d\n", __func__, power_onoff);
 
 	if (power_onoff == 0)
